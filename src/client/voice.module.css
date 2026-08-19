@@ -1,0 +1,178 @@
+.callButton {
+  width: 30px;
+  height: 30px;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  color: var(--dsw-alias-text-secondary);
+  background: transparent;
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease, transform 120ms ease;
+}
+.callButton:hover {
+  color: var(--dsw-alias-text-primary);
+  background: var(--dsw-alias-fill-hover);
+}
+
+.callButton:active {
+  transform: scale(.94);
+}
+
+.callButtonActive {
+  color: var(--dsw-alias-button-danger-text, #fff);
+  background: var(--dsw-alias-button-danger-fill, #e5484d);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--dsw-alias-button-danger-fill, #e5484d) 18%, transparent);
+}
+
+.icon {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.stopGlyph {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: currentColor;
+}
+
+.overlay {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  width: min(560px, calc(100vw - 32px));
+  transform: translateX(-50%);
+  padding: 18px;
+  border: 1px solid var(--dsw-alias-border-subtle);
+  border-radius: 20px;
+  color: var(--dsw-alias-text-primary);
+  background: color-mix(in srgb, var(--dsw-alias-surface-primary) 94%, transparent);
+  box-shadow: 0 20px 60px rgb(0 0 0 / 20%);
+  backdrop-filter: blur(18px);
+}
+
+.overlayError {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.overlayHeader,
+.controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.eyebrow {
+  margin-bottom: 4px;
+  color: var(--dsw-alias-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.phaseLine {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.liveDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--dsw-alias-status-success, #30a46c);
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--dsw-alias-status-success, #30a46c) 18%, transparent);
+}
+
+.agentState {
+  padding: 6px 10px;
+  border-radius: 999px;
+  color: var(--dsw-alias-text-secondary);
+  background: var(--dsw-alias-fill-subtle);
+  font-size: 12px;
+}
+
+.transcripts {
+  display: grid;
+  gap: 8px;
+  min-height: 92px;
+  margin: 16px 0;
+  padding: 14px;
+  border-radius: 14px;
+  background: var(--dsw-alias-fill-subtle);
+}
+
+.userText,
+.assistantText {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.userText {
+  color: var(--dsw-alias-text-secondary);
+  font-size: 13px;
+}
+
+.assistantText {
+  font-size: 15px;
+}
+
+.controls {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.secondaryButton,
+.endButton {
+  padding: 7px 12px;
+  border: 1px solid var(--dsw-alias-border-subtle);
+  border-radius: 999px;
+  color: var(--dsw-alias-text-primary);
+  background: var(--dsw-alias-surface-primary);
+  cursor: pointer;
+}
+
+.endButton {
+  border-color: transparent;
+  color: #fff;
+  background: var(--dsw-alias-button-danger-fill, #e5484d);
+}
+
+.inlineError,
+.errorText {
+  color: var(--dsw-alias-status-danger-text, #d13438);
+  font-size: 13px;
+}
+
+.errorText {
+  flex: 1;
+}
+
+@media (max-width: 640px) {
+  .overlay {
+    bottom: 12px;
+    padding: 14px;
+    border-radius: 16px;
+  }
+
+  .controls {
+    justify-content: stretch;
+  }
+
+  .secondaryButton,
+  .endButton {
+    flex: 1;
+  }
+}

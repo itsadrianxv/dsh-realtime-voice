@@ -1,0 +1,8 @@
+node_modules/
+*.log
+.env
+.env.*
+coverage/
+.artifacts/
+lib/*.mjs
+lib/*.mjs.map

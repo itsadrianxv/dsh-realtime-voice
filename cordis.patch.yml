@@ -1,0 +1,5 @@
+# One package, three official DSH roles: bundle layer, Host plugin, and Web client plugin.
+- insert:
+    - id: realtime-voice
+      name: '@harness-remote/dsh-realtime-voice'
+      inject: [webServer, apiProxy, credentials]
