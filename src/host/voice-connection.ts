@@ -129,7 +129,11 @@ export class VoiceConnection {
     const status = await this.tools.status()
     const credential = await this.ctx.credentials.resolve(credentialRef(this.config.apiKeyEnv))
     if (credential === undefined) {
-      this.fail('credential-missing', `DSH 凭据 ${this.config.apiKeyEnv} 尚未配置。`, false)
+      this.fail(
+        'credential-missing',
+        `未检测到 ${this.config.apiKeyEnv}。请打开“设置 → 插件 → DSH 实时语音”安全保存百炼 API Key，或在本机环境中配置同名变量。`,
+        false,
+      )
       return
     }
     const instructions = buildInstructions(status)

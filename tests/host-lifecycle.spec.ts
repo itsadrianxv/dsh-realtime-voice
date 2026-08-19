@@ -26,6 +26,9 @@ describe('Host plugin lifecycle', () => {
       effect: vi.fn((factory: () => () => void | Promise<void>) => {
         lifecycle = factory()
       }),
+      // Settings is an optional Host service; this lifecycle unit deliberately
+      // exercises the no-settings composition.
+      inject: vi.fn(),
     }
 
     apply(context as never, config)

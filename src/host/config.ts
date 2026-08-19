@@ -1,10 +1,15 @@
 import z from '@deepseek-ai/schemastery'
+import {
+  DEFAULT_REALTIME_VOICE_MODEL,
+  REALTIME_VOICE_MODELS,
+  type RealtimeVoiceModel,
+} from '../models.ts'
 
 /** Host-side realtime voice configuration; secrets are references, never values. */
 export interface VoiceConfig {
   endpoint: string
   apiKeyEnv: string
-  model: string
+  model: RealtimeVoiceModel
   voice: string
   turnDetection: 'server_vad' | 'smart_turn'
   silenceDurationMs: number
@@ -17,7 +22,7 @@ export interface VoiceConfig {
 export const Config: z<VoiceConfig> = z.object({
   endpoint: z.string().default('wss://dashscope.aliyuncs.com/api-ws/v1/realtime'),
   apiKeyEnv: z.string().default('DASHSCOPE_API_KEY'),
-  model: z.string().default('qwen-audio-3.0-realtime-plus'),
+  model: z.union([REALTIME_VOICE_MODELS.flash, REALTIME_VOICE_MODELS.plus]).default(DEFAULT_REALTIME_VOICE_MODEL),
   voice: z.string().default('longanqian'),
   turnDetection: z.union(['server_vad', 'smart_turn']).default('smart_turn'),
   silenceDurationMs: z.natural().min(200).max(6000).default(600),

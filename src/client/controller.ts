@@ -24,6 +24,7 @@ export interface VoiceSnapshot {
   assistantTranscript: string
   agentRunning: boolean
   agentSummary?: string
+  providerModel?: string
   elapsedSeconds: number
   error?: string | undefined
 }
@@ -235,6 +236,7 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
           ...this.snapshot,
           phase: 'listening',
           voiceSessionId: message.voiceSessionId,
+          providerModel: message.provider.model,
           agentRunning: message.target.running,
           error: undefined,
         })

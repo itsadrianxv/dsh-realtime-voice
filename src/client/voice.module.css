@@ -1,24 +1,28 @@
 .callButton {
-  width: 30px;
-  height: 30px;
+  /* conversation.input.right is rendered before Send in the official DOM.
+     Flex order moves this additive plugin seat to the requested visual place
+     after Send without replacing or patching DSH's InputBar. */
+  order: 100;
+  width: 34px;
+  height: 34px;
   display: inline-grid;
   place-items: center;
   flex: none;
   padding: 0;
   border: 0;
   border-radius: 999px;
-  color: var(--dsw-alias-text-secondary);
-  background: transparent;
+  color: #fff;
+  background: var(--dsw-alias-button-info-fill, #3964fe);
   cursor: pointer;
-  transition: color 120ms ease, background 120ms ease, transform 120ms ease;
+  transform: translateY(-2px);
+  transition: color 120ms ease, background 120ms ease, transform 120ms ease, box-shadow 120ms ease;
 }
 .callButton:hover {
-  color: var(--dsw-alias-text-primary);
-  background: var(--dsw-alias-fill-hover);
+  background: var(--dsw-alias-button-info-hover, #2f55dc);
 }
 
 .callButton:active {
-  transform: scale(.94);
+  transform: translateY(-2px) scale(.94);
 }
 
 .callButtonActive {
@@ -28,11 +32,11 @@
 }
 
 .icon {
-  width: 18px;
-  height: 18px;
+  width: 17px;
+  height: 17px;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.8;
+  stroke-width: 1.55;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
@@ -46,20 +50,32 @@
 
 .overlay {
   position: fixed;
-  left: 50%;
-  bottom: 24px;
-  width: min(560px, calc(100vw - 32px));
-  transform: translateX(-50%);
-  padding: 18px;
+  top: 72px;
+  right: 20px;
+  bottom: 20px;
+  width: min(372px, calc(100vw - 40px));
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
   border: 1px solid var(--dsw-alias-border-subtle);
-  border-radius: 20px;
+  border-radius: 18px;
   color: var(--dsw-alias-text-primary);
   background: color-mix(in srgb, var(--dsw-alias-surface-primary) 94%, transparent);
-  box-shadow: 0 20px 60px rgb(0 0 0 / 20%);
+  box-shadow: 0 18px 56px rgb(0 0 0 / 18%);
   backdrop-filter: blur(18px);
+  overflow: hidden;
+  transition: width 160ms ease, bottom 160ms ease;
+}
+
+.overlayCollapsed {
+  bottom: auto;
+  width: 292px;
 }
 
 .overlayError {
+  top: auto;
+  bottom: 20px;
+  width: min(372px, calc(100vw - 40px));
   display: flex;
   align-items: center;
   gap: 14px;
@@ -71,6 +87,24 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+}
+
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.iconButton {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--dsw-alias-border-l2, var(--dsw-alias-border-subtle));
+  border-radius: 999px;
+  color: var(--dsw-alias-label-secondary, var(--dsw-alias-text-secondary));
+  background: var(--dsw-alias-bg-layer-3, var(--dsw-alias-surface-primary));
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
 }
 
 .eyebrow {
@@ -104,14 +138,64 @@
   font-size: 12px;
 }
 
+.bindingCard {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid var(--dsw-alias-border-l2, var(--dsw-alias-border-subtle));
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-layer-3, var(--dsw-alias-fill-subtle));
+}
+
+.bindingLabel,
+.speakerLabel {
+  color: var(--dsw-alias-label-tertiary, var(--dsw-alias-text-secondary));
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.bindingTitle {
+  margin-top: 3px;
+  color: var(--dsw-alias-label-primary, var(--dsw-alias-text-primary));
+  font-size: 14px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bindingMeta {
+  margin-top: 5px;
+  color: var(--dsw-alias-label-tertiary, var(--dsw-alias-text-secondary));
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.returnLink {
+  margin-top: 8px;
+  padding: 0;
+  border: 0;
+  color: var(--dsw-alias-brand-primary, #3964fe);
+  background: transparent;
+  font-size: 12px;
+  cursor: pointer;
+}
+
 .transcripts {
   display: grid;
-  gap: 8px;
-  min-height: 92px;
-  margin: 16px 0;
-  padding: 14px;
-  border-radius: 14px;
-  background: var(--dsw-alias-fill-subtle);
+  align-content: start;
+  gap: 12px;
+  min-height: 120px;
+  margin: 14px 0;
+  padding: 2px 4px 2px 2px;
+  overflow-y: auto;
+}
+
+.transcriptBlock {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--dsw-alias-fill-subtle, var(--dsw-alias-bg-layer-3));
 }
 
 .userText,
@@ -129,7 +213,25 @@
   font-size: 15px;
 }
 
+.agentSummary {
+  display: grid;
+  gap: 5px;
+  max-height: 120px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--dsw-alias-brand-primary, #3964fe);
+  border-radius: 0 10px 10px 0;
+  color: var(--dsw-alias-label-secondary, var(--dsw-alias-text-secondary));
+  background: var(--dsw-alias-bg-layer-2, var(--dsw-alias-fill-subtle));
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-y: auto;
+}
+
 .controls {
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid var(--dsw-alias-border-l2, var(--dsw-alias-border-subtle));
   justify-content: flex-end;
   flex-wrap: wrap;
 }
@@ -160,11 +262,231 @@
   flex: 1;
 }
 
-@media (max-width: 640px) {
+/* Native Settings -> Plugins card. */
+.settingsCard {
+  list-style: none;
+  border: 1px solid var(--dsw-alias-border-l2, var(--dsw-alias-border-subtle));
+  border-radius: 12px;
+  color: var(--dsw-alias-label-primary, var(--dsw-alias-text-primary));
+  background: var(--dsw-alias-bg-layer-3, var(--dsw-alias-surface-primary));
+}
+
+.settingsCardHeader {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+}
+
+.settingsCardIcon {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  flex: none;
+  border-radius: 10px;
+  color: #fff;
+  background: var(--dsw-alias-button-info-fill, #3964fe);
+}
+
+.settingsCardHeading {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.settingsCardHeading strong {
+  font-size: 15px;
+}
+
+.settingsCardHeading span {
+  color: var(--dsw-alias-label-tertiary, var(--dsw-alias-text-secondary));
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.settingsCardBody {
+  margin: 0 16px;
+  padding: 14px 0 16px;
+  border-top: 1px solid var(--dsw-alias-border-l2, var(--dsw-alias-border-subtle));
+}
+
+.settingsLabel {
+  margin-bottom: 9px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.modelSwitch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.modelChoice {
+  position: relative;
+  min-width: 0;
+  padding: 11px 34px 11px 12px;
+  border: 1px solid var(--dsw-alias-border-l2, var(--dsw-alias-border-subtle));
+  border-radius: 10px;
+  color: inherit;
+  background: var(--dsw-alias-bg-layer-2, transparent);
+  text-align: left;
+  cursor: pointer;
+}
+
+.modelChoiceSelected {
+  border-color: var(--dsw-alias-brand-primary, #3964fe);
+  box-shadow: 0 0 0 1px var(--dsw-alias-brand-primary, #3964fe);
+}
+
+.modelChoice:disabled {
+  opacity: .55;
+  cursor: default;
+}
+
+.modelChoiceTitle,
+.modelChoiceDetail {
+  display: block;
+}
+
+.modelChoiceTitle {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.modelChoiceDetail {
+  margin-top: 4px;
+  color: var(--dsw-alias-label-tertiary, var(--dsw-alias-text-secondary));
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.radioDot {
+  position: absolute;
+  top: 13px;
+  right: 12px;
+  width: 12px;
+  height: 12px;
+  border: 1px solid var(--dsw-alias-label-dimmed, #8a8f98);
+  border-radius: 50%;
+}
+
+.modelChoiceSelected .radioDot {
+  border: 4px solid var(--dsw-alias-brand-primary, #3964fe);
+}
+
+.settingsHint,
+.settingsError {
+  margin: 9px 0 0;
+  color: var(--dsw-alias-label-tertiary, var(--dsw-alias-text-secondary));
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.settingsError {
+  color: var(--dsw-alias-label-error, #d13438);
+}
+
+.credentialSection {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--dsw-alias-border-l2, var(--dsw-alias-border-subtle));
+}
+
+.credentialStatus {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 9px;
+  color: var(--dsw-alias-label-tertiary, var(--dsw-alias-text-secondary));
+  font-size: 12px;
+}
+
+.credentialDot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--dsw-alias-label-error, #d13438);
+}
+
+.credentialStatus[data-configured] .credentialDot {
+  background: var(--dsw-alias-status-success, #30a46c);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dsw-alias-status-success, #30a46c) 14%, transparent);
+}
+
+.credentialInputRow {
+  display: flex;
+  gap: 8px;
+}
+
+.credentialInput {
+  min-width: 0;
+  height: 36px;
+  flex: 1;
+  padding: 0 11px;
+  border: 1px solid var(--dsw-alias-border-l2, var(--dsw-alias-border-subtle));
+  border-radius: 8px;
+  outline: none;
+  color: var(--dsw-alias-label-primary, var(--dsw-alias-text-primary));
+  background: var(--dsw-alias-bg-layer-2, var(--dsw-alias-surface-primary));
+  font: inherit;
+  font-size: 13px;
+}
+
+.credentialInput:focus {
+  border-color: var(--dsw-alias-brand-primary, #3964fe);
+}
+
+.credentialSave {
+  height: 36px;
+  flex: none;
+  padding: 0 13px;
+  border: 0;
+  border-radius: 8px;
+  color: #fff;
+  background: var(--dsw-alias-button-info-fill, #3964fe);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.credentialSave:disabled,
+.credentialInput:disabled {
+  opacity: .5;
+  cursor: default;
+}
+
+/* On desktop, reserve a real rail inside the DSH frame so the fixed voice
+   surface floats at the right without painting over the Agent transcript.
+   The frame is selected only while this plugin's own overlay is mounted;
+   uninstalling the client bundle removes both the node and this rule. */
+@media (min-width: 1200px) {
+  :global(div:has(> [data-shell-overlay])):has(.overlay:not(.overlayCollapsed)) {
+    box-sizing: border-box;
+    padding-right: 412px;
+  }
+
+  :global(div:has(> [data-shell-overlay])):has(.overlayCollapsed) {
+    box-sizing: border-box;
+    padding-right: 324px;
+  }
+}
+
+@media (max-width: 1199px) {
   .overlay {
+    top: auto;
+    right: 12px;
     bottom: 12px;
+    width: min(420px, calc(100vw - 24px));
+    max-height: min(560px, calc(100vh - 24px));
     padding: 14px;
     border-radius: 16px;
+  }
+
+  .overlayCollapsed {
+    width: min(292px, calc(100vw - 24px));
   }
 
   .controls {
@@ -174,5 +496,11 @@
   .secondaryButton,
   .endButton {
     flex: 1;
+  }
+}
+
+@media (max-width: 520px) {
+  .modelSwitch {
+    grid-template-columns: 1fr;
   }
 }

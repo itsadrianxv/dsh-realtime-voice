@@ -10,6 +10,7 @@ export interface VoiceSnapshot {
     assistantTranscript: string;
     agentRunning: boolean;
     agentSummary?: string;
+    providerModel?: string;
     elapsedSeconds: number;
     error?: string | undefined;
 }

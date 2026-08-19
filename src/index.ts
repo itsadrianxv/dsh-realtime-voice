@@ -5,10 +5,12 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-host-apiproxy'
 import type {} from '@deepseek-ai/dsh-host-webserver'
+import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { WebSocketServer } from 'ws'
 import { VOICE_ROUTE } from './protocol.ts'
 import { Config, type VoiceConfig } from './host/config.ts'
 import { VoiceConnection } from './host/voice-connection.ts'
+import { REALTIME_VOICE_SETTINGS_NAMESPACE } from './models.ts'
 
 export { Config }
 export type { VoiceConfig }
@@ -20,21 +22,37 @@ export const inject = ['webServer', 'apiProxy', 'credentials']
 export function apply(ctx: Context, config: VoiceConfig): void {
   const server = new WebSocketServer({ noServer: true })
   const connections = new Set<VoiceConnection>()
+  let readConfig = (): VoiceConfig => config
+
+  // Settings are optional at the Cordis boundary. When the Web profile serves
+  // them, model changes become authoritative for the next accepted call; an
+  // already connected upstream keeps its negotiated model until that call ends.
+  installSettingsSection(
+    ctx,
+    settingsNamespace(REALTIME_VOICE_SETTINGS_NAMESPACE),
+    Config,
+    config,
+    {
+      setSource(source) { readConfig = source },
+      onChange() {},
+    },
+  )
 
   const upgrade = (request: IncomingMessage, socket: Duplex, head: Buffer): void => {
+    const activeConfig = readConfig()
     if (!isLoopback(request.socket.remoteAddress) || !isAllowedOrigin(request)) {
       socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
       socket.destroy()
       return
     }
-    if (connections.size >= config.maxConnections) {
+    if (connections.size >= activeConfig.maxConnections) {
       socket.write('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n')
       socket.destroy()
       return
     }
     server.handleUpgrade(request, socket, head, (websocket) => {
       let connection: VoiceConnection
-      connection = new VoiceConnection(ctx, websocket, request, config, () => connections.delete(connection))
+      connection = new VoiceConnection(ctx, websocket, request, activeConfig, () => connections.delete(connection))
       connections.add(connection)
     })
   }

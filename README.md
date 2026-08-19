@@ -2,14 +2,16 @@
 
 DeepSeek Harness 官方插件形态的实时语音 Agent：安装后在 WebUI 输入框旁出现拨打按钮，用户可持续对话、打断播报、询问进度，并用语音启动、追加、纠正或停止当前 DSH Agent 工作。
 
-当前版本：`0.1.0-alpha.3`，目标 DSH：`0.1.0-rc.7`。
+当前版本：`0.1.0-alpha.4`，目标 DSH：`0.1.0-rc.7`。
 
 本包同时声明 DSH bundle、Host 插件和“原生 WebUI 浏览器侧”插件。这里不是另做一个网站：UI 直接注入 DSH 自带的 `http://127.0.0.1:3080`，不新增页面或 UI 端口。它不修改 DSH 源码，不另起后台进程；卸载或禁用时会移除 UI/路由并关闭麦克风、音频、浏览器 WebSocket 和百炼连接，已经交给 DSH 的任务继续运行。
 
 ## 当前能力
 
-- DSH 原生 3080 WebUI 输入框右侧的实时语音拨打按钮和全局通话浮层
-- Qwen Audio 3.0 Realtime，默认质量档 `qwen-audio-3.0-realtime-plus`；配置改为 `qwen-audio-3.0-realtime-flash` 即可切换极速档
+- DSH 原生 3080 WebUI：拨号按钮位于发送按钮右侧，使用同尺寸、同色系的通话图标
+- 宽屏右侧独立浮动通话栏（中央 Agent 消息区自动让位），窄屏降级为可收起底部浮层
+- “设置 → 插件 → DSH 实时语音”内一键切换 Qwen Audio Realtime Flash/Plus；下一通生效，不中断当前通话
+- 自动识别 `DASHSCOPE_API_KEY`，也可在插件设置中通过 DSH 官方 credentials 安全写入或替换；浏览器不可回读明文
 - `smart_turn`/服务端 VAD、实时转写、流式 PCM 播放、用户打断
 - Function Calling 到官方 DSH `apiProxy`：开始、queue/steer、状态、取消
 - 按工作区/标题检索其他 DSH 会话，并读取指定会话最后一条 Agent 回复
@@ -23,6 +25,8 @@ DeepSeek Harness 官方插件形态的实时语音 Agent：安装后在 WebUI �
 ## 上下文模型
 
 实时语音上下文与 DSH 会话不会机械合并。DSH 会话是长期事实源，保存用户确认过的工作指令、Agent 执行和最终回复；语音上下文只保存短期口语、字幕、打断和工具调用。实际工作通过官方 `session.prompt` 写入拨号时绑定的 DSH 会话，插件再订阅该会话事件，以 `sessionId + turn + eventSeq` 关联并去重，在 `turn/end` 后把最终 `assistant/message` 注入语音模型继续播报。寒暄、静音和打断不会污染工作线程；断线重连时从 DSH 状态与最近回复恢复。
+
+一通电话与拨号瞬间的 DSH `sessionId` 一对一绑定，而且全局同时只允许一通。页面切换不会迁移通话，右侧栏始终显示绑定线程并可返回。DSH 的“新建会话”页面在选定工作区后已经持有一个空白 session：从这里拨号会绑定这个空白线程，首条需要 Agent 执行的语音指令成为第一轮；纯寒暄不会写入。尚未选工作区、因此尚无 session 时，插件不会猜目录或偷偷创建无归属会话，选择工作区后拨号入口自动出现。
 
 ## 本地开发安装
 
@@ -38,14 +42,14 @@ dsh plugin --profile web add .
 
 ## 配置密钥
 
-插件配置只保存凭据引用，默认是 `DASHSCOPE_API_KEY`。请通过 DSH 的 credentials 能力保存该引用对应的 Key，或在启动 DSH 的环境中提供同名变量。不要把 Key 写入 `cordis.patch.yml`、浏览器代码或 Git。
+插件配置只保存凭据引用，默认是 `DASHSCOPE_API_KEY`。安装后会自动识别启动 DSH 的系统环境或已有 DSH credentials；也可以打开“设置 → 插件 → DSH 实时语音”直接输入。输入值走官方 write-only credentials API，设置页面只能看到“已配置/未配置”，不能回读明文。不要把 Key 写入 `cordis.patch.yml`、浏览器代码或 Git。
 
 ## 一键安装目标
 
 首个可用版验证完成并发布 GitHub tag 后：
 
 ```powershell
-dsh plugin --profile web add github:martinbear1/dsh-realtime-voice#v0.1.0-alpha.3
+dsh plugin --profile web add github:martinbear1/dsh-realtime-voice#v0.1.0-alpha.4
 ```
 
 发布包会提交预构建 `lib/`，不使用会触发 pnpm `allowBuilds` 的 `prepare`，以保持一条命令安装。
@@ -66,6 +70,9 @@ dsh plugin --profile web remove @harness-remote/dsh-realtime-voice
 
 - DSH `0.1.0-rc.7` 官方 CLI 本地安装、卸载、重新安装
 - 原生 3080 WebUI 插槽：安装后按钮 1 个，卸载后 0 个，重装后恢复
+- 真实 WebUI 插件配置卡：Flash/Plus 即时持久化切换；系统 Key 状态检测和 write-only 输入框正常挂载
+- 真实 WebUI 布局测量：拨号按钮与发送按钮均为 34px 蓝色圆形，拨号按钮位于发送按钮右侧
+- 现有 Agent 会话与所选工作区空白新会话均出现拨号入口；无工作区时不创建隐式任务会话
 - `qwen-audio-3.0-realtime-plus` 真实建连、`voice.ready` 和 ping/pong
 - 合成语音完整回环：16 kHz PCM 上行、英文转写、`received` 回复及 24 kHz PCM 下行
 - 插件增删前后 28 个现有会话及最新会话 ID 保持一致
