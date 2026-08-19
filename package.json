@@ -1,6 +1,6 @@
 {
   "name": "@harness-remote/dsh-realtime-voice",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "description": "Hot-disposable realtime voice Agent plugin for DeepSeek Harness WebUI and future WeChat Mini Program clients",
   "keywords": [
     "deepseek-harness",

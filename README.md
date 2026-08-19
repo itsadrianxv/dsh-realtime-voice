@@ -2,7 +2,7 @@
 
 DeepSeek Harness 官方插件形态的实时语音 Agent：安装后在 WebUI 输入框旁出现拨打按钮，用户可持续对话、打断播报、询问进度，并用语音启动、追加、纠正或停止当前 DSH Agent 工作。
 
-当前版本：`0.1.0-alpha.1`，目标 DSH：`0.1.0-rc.7`。
+当前版本：`0.1.0-alpha.2`，目标 DSH：`0.1.0-rc.7`。
 
 本包同时声明 DSH bundle、Host 插件和“原生 WebUI 浏览器侧”插件。这里不是另做一个网站：UI 直接注入 DSH 自带的 `http://127.0.0.1:3080`，不新增页面或 UI 端口。它不修改 DSH 源码，不另起后台进程；卸载或禁用时会移除 UI/路由并关闭麦克风、音频、浏览器 WebSocket 和百炼连接，已经交给 DSH 的任务继续运行。
 
@@ -12,10 +12,16 @@ DeepSeek Harness 官方插件形态的实时语音 Agent：安装后在 WebUI �
 - Qwen Audio 3.0 Realtime，默认质量档 `qwen-audio-3.0-realtime-plus`；配置改为 `qwen-audio-3.0-realtime-flash` 即可切换极速档
 - `smart_turn`/服务端 VAD、实时转写、流式 PCM 播放、用户打断
 - Function Calling 到官方 DSH `apiProxy`：开始、queue/steer、状态、取消
+- 按工作区/标题检索其他 DSH 会话，并读取指定会话最后一条 Agent 回复
+- 双层上下文闭环：工作指令进入持久 DSH 会话，`turn/end` 的最终 Agent 回复回灌语音上下文并主动播报
 - DSH credentials 解析 `DASHSCOPE_API_KEY`，密钥不进入浏览器包
 - `dsh.voice.v1` 二进制协议，WebUI 与微信小程序共用底层契约
 
 运行时只使用两层模型：Qwen Audio Realtime 负责听说、打断和受限 Function Calling；DSH 当前会话选择的 DeepSeek/千问等编码模型负责真正的 Agent 工作。语音模型不会旁路 DSH 自己修改代码。
+
+## 上下文模型
+
+实时语音上下文与 DSH 会话不会机械合并。DSH 会话是长期事实源，保存用户确认过的工作指令、Agent 执行和最终回复；语音上下文只保存短期口语、字幕、打断和工具调用。实际工作通过官方 `session.prompt` 写入拨号时绑定的 DSH 会话，插件再订阅该会话事件，以 `sessionId + turn + eventSeq` 关联并去重，在 `turn/end` 后把最终 `assistant/message` 注入语音模型继续播报。寒暄、静音和打断不会污染工作线程；断线重连时从 DSH 状态与最近回复恢复。
 
 ## 本地开发安装
 
@@ -38,7 +44,7 @@ dsh plugin --profile web add .
 首个可用版验证完成并发布 GitHub tag 后：
 
 ```powershell
-dsh plugin --profile web add github:martinbear1/dsh-realtime-voice#v0.1.0-alpha.1
+dsh plugin --profile web add github:martinbear1/dsh-realtime-voice#v0.1.0-alpha.2
 ```
 
 发布包会提交预构建 `lib/`，不使用会触发 pnpm `allowBuilds` 的 `prepare`，以保持一条命令安装。

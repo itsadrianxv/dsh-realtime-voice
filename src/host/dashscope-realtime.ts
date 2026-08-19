@@ -15,6 +15,11 @@ interface PendingTool {
   result: Promise<VoiceToolResult>
 }
 
+interface AgentAnnouncement {
+  eventSeq: number
+  text: string
+}
+
 const TOOL_DEFINITIONS = [
   {
     type: 'function',
@@ -54,6 +59,35 @@ const TOOL_DEFINITIONS = [
   {
     type: 'function',
     function: {
+      name: 'list_sessions',
+      description: '按标题或工作区关键词检索 DSH 会话。用户提到其他项目、线程或会话时先调用它，再用返回的 sessionId 读取回复。',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: '会话标题或主题关键词，例如“做成微信小程序”。' },
+          workspace: { type: 'string', description: '工作区目录或名称关键词，例如“deepseek-harness”。' },
+          limit: { type: 'integer', minimum: 1, maximum: 10, description: '最多返回多少条，默认 5。' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_session_latest_reply',
+      description: '读取指定 DSH 会话最后一条 Agent 回复；sessionId 必须来自 list_sessions 的结果。',
+      parameters: {
+        type: 'object',
+        properties: {
+          sessionId: { type: 'string', description: '准确的 DSH sessionId。' },
+        },
+        required: ['sessionId'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'cancel_task',
       description: '停止当前 DSH 会话正在执行的 Agent 回合，但保留排队任务。',
       parameters: { type: 'object', properties: {} },
@@ -65,6 +99,11 @@ const TOOL_DEFINITIONS = [
 export class DashScopeRealtime {
   private socket: WebSocket | undefined
   private readonly pendingTools = new Map<string, PendingTool[]>()
+  private readonly queuedAgentAnnouncements: AgentAnnouncement[] = []
+  private readonly announcedEventSeqs = new Set<number>()
+  private responseActive = false
+  private responseRequested = false
+  private inputSpeechActive = false
   private closed = false
 
   constructor(
@@ -163,6 +202,15 @@ export class DashScopeRealtime {
     this.send({ type: 'response.cancel' })
   }
 
+  /** Feed a completed durable DSH turn back into the short-lived voice context and speak it once. */
+  announceAgentResult(text: string, eventSeq: number): void {
+    if (this.closed || this.announcedEventSeqs.has(eventSeq)) return
+    this.announcedEventSeqs.add(eventSeq)
+    this.queuedAgentAnnouncements.push({ eventSeq, text: text.slice(0, 2_000) })
+    if (this.queuedAgentAnnouncements.length > 3) this.queuedAgentAnnouncements.shift()
+    this.drainAgentAnnouncements()
+  }
+
   close(): void {
     if (this.closed) return
     this.closed = true
@@ -172,6 +220,19 @@ export class DashScopeRealtime {
 
   private handleEvent(event: DashScopeServerEvent): void {
     this.callbacks.onEvent(event)
+    if (event.type === 'input_audio_buffer.speech_started') {
+      this.inputSpeechActive = true
+      return
+    }
+    if (event.type === 'input_audio_buffer.speech_stopped') {
+      this.inputSpeechActive = false
+      return
+    }
+    if (event.type === 'response.created') {
+      this.responseActive = true
+      this.responseRequested = false
+      return
+    }
     if (event.type === 'response.function_call_arguments.done') {
       const responseId = stringField(event, 'response_id')
       const call: VoiceToolCall = {
@@ -185,13 +246,25 @@ export class DashScopeRealtime {
       return
     }
     if (event.type !== 'response.done') return
+    this.responseActive = false
+    this.responseRequested = false
     const response = event.response as Record<string, unknown> | undefined
     const responseId = typeof response?.id === 'string' ? response.id : undefined
-    if (responseId === undefined) return
+    if (responseId === undefined) {
+      this.drainAgentAnnouncements()
+      return
+    }
     const pending = this.pendingTools.get(responseId)
-    if (pending === undefined || pending.length === 0) return
+    if (pending === undefined || pending.length === 0) {
+      this.drainAgentAnnouncements()
+      return
+    }
     this.pendingTools.delete(responseId)
+    // Reserve the next response while DSH executes the tool so a simultaneous
+    // Agent-completion announcement cannot race the function result follow-up.
+    this.responseRequested = true
     void this.finishTools(pending).catch((error: unknown) => {
+      this.responseRequested = false
       if (!this.closed) this.callbacks.onEvent({
         type: 'error',
         error: {
@@ -218,6 +291,33 @@ export class DashScopeRealtime {
         },
       })
     }
+    this.requestResponse()
+  }
+
+  private drainAgentAnnouncements(): void {
+    if (this.closed
+      || this.inputSpeechActive
+      || this.responseActive
+      || this.responseRequested
+      || this.queuedAgentAnnouncements.length === 0) return
+    const announcement = this.queuedAgentAnnouncements.shift()!
+    this.send({
+      type: 'conversation.item.create',
+      item: {
+        id: `dsh_agent_${announcement.eventSeq}`,
+        type: 'message',
+        role: 'system',
+        content: [{
+          type: 'input_text',
+          text: `DSH Agent 刚完成了一次工作。以下是 DSH 会话中的权威最终回复。请用自然、简短的中文主动向用户播报结果，不要重复提交任务：\n${announcement.text}`,
+        }],
+      },
+    })
+    this.requestResponse()
+  }
+
+  private requestResponse(): void {
+    this.responseRequested = true
     this.send({ type: 'response.create' })
   }
 

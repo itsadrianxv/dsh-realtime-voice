@@ -4,6 +4,7 @@ interface SessionStatus {
     running: boolean;
     blank: boolean;
     cwd?: string;
+    title?: string;
     summary?: string;
 }
 export interface VoiceToolCall {
@@ -27,7 +28,9 @@ export declare class DshVoiceTools {
     status(): Promise<SessionStatus>;
     private executeOnce;
     private prompt;
+    private sessions;
     private lastAssistantText;
     private rpcId;
 }
+export declare function assistantText(value: unknown): string | undefined;
 export {};

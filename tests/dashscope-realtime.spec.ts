@@ -57,7 +57,7 @@ describe('DashScope realtime provider', () => {
     await provider.connect()
     const update = socket.sent.find(message => message.type === 'session.update')
     expect(update).toBeDefined()
-    expect((update?.session as Record<string, unknown>).tools).toHaveLength(4)
+    expect((update?.session as Record<string, unknown>).tools).toHaveLength(6)
 
     socket.event({
       type: 'response.function_call_arguments.done',
@@ -78,6 +78,39 @@ describe('DashScope realtime provider', () => {
       expect(socket.sent.filter(message => message.type === 'conversation.item.create')).toHaveLength(2)
     })
     expect(onTool).toHaveBeenCalledTimes(2)
+    expect(socket.sent.filter(message => message.type === 'response.create')).toHaveLength(1)
+    provider.close()
+  })
+
+  it('queues a durable Agent result while speaking and announces it exactly once after the response', async () => {
+    const socket = new FakeSocket()
+    const provider = new DashScopeRealtime(
+      config,
+      'secret-not-logged',
+      'voice instructions',
+      { onEvent: vi.fn(), onTool: vi.fn() },
+      (() => {
+        queueMicrotask(() => socket.event({ type: 'session.created' }))
+        return socket as unknown as WebSocket
+      }),
+    )
+    await provider.connect()
+    socket.event({ type: 'response.created', response: { id: 'voice-response' } })
+    provider.announceAgentResult('Agent finished successfully', 42)
+    provider.announceAgentResult('Agent finished successfully', 42)
+    expect(socket.sent.filter(message => message.type === 'conversation.item.create')).toHaveLength(0)
+
+    socket.event({ type: 'response.done', response: { id: 'voice-response' } })
+    const items = socket.sent.filter(message => message.type === 'conversation.item.create')
+    expect(items).toHaveLength(1)
+    expect(items[0]).toMatchObject({
+      item: {
+        id: 'dsh_agent_42',
+        type: 'message',
+        role: 'system',
+        content: [{ type: 'input_text' }],
+      },
+    })
     expect(socket.sent.filter(message => message.type === 'response.create')).toHaveLength(1)
     provider.close()
   })

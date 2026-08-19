@@ -18,7 +18,7 @@ import {
 } from '../protocol.ts'
 import type { VoiceConfig } from './config.ts'
 import { DashScopeRealtime, type DashScopeServerEvent } from './dashscope-realtime.ts'
-import { DshVoiceTools, type VoiceToolCall } from './dsh-tools.ts'
+import { assistantText, DshVoiceTools, type VoiceToolCall } from './dsh-tools.ts'
 
 /** One browser or Mini Program call, pinned to one DSH session for its full lifetime. */
 export class VoiceConnection {
@@ -38,6 +38,7 @@ export class VoiceConnection {
   private ready = false
   private helloTimer: ReturnType<typeof setTimeout>
   private hostEventsAbort: AbortController | undefined
+  private readonly pendingAssistantByTurn = new Map<number, string>()
 
   constructor(
     private readonly ctx: Context,
@@ -155,7 +156,7 @@ export class VoiceConnection {
       capabilities: { bargeIn: true, functionCalling: true, reconnect: true, persistentAgentTask: true },
     })
     this.sendState('listening')
-    this.followHostEvents(hello.target.sessionId)
+    this.followDshEvents(hello.target.sessionId)
   }
 
   private onProviderEvent(event: DashScopeServerEvent): void {
@@ -240,7 +241,7 @@ export class VoiceConnection {
     return result
   }
 
-  private followHostEvents(sessionId: string): void {
+  private followDshEvents(sessionId: string): void {
     const abort = new AbortController()
     this.hostEventsAbort = abort
     const request = { rpcId: this.rpcId(), payload: {} }
@@ -250,6 +251,38 @@ export class VoiceConnection {
         if (frame.type === 'host/session-status' && frame.sessionId === sessionId) {
           this.send({ type: 'voice.agent-status', serverSeq: this.nextSeq(), sessionId, running: frame.running })
         }
+      }
+    })().catch((error: unknown) => {
+      if (!abort.signal.aborted) this.ctx.logger.warn(error)
+    })
+    const muxRequest = { rpcId: this.rpcId(), payload: {} }
+    void (async () => {
+      for await (const item of this.ctx.apiProxy.events.mux(muxRequest, abort.signal)) {
+        const frame = item.payload
+        if (frame.type !== 'session/event' || frame.sessionId !== sessionId) continue
+        const event = frame.event
+        if (event.type === 'assistant/message') {
+          const data = event.data as Record<string, unknown>
+          const turn = data.turn
+          const text = assistantText(event)
+          if (typeof turn === 'number' && text !== undefined) this.pendingAssistantByTurn.set(turn, text)
+          continue
+        }
+        if (event.type !== 'turn/end') continue
+        const data = event.data as Record<string, unknown>
+        const turn = data.turn
+        if (typeof turn !== 'number') continue
+        const text = this.pendingAssistantByTurn.get(turn)
+        this.pendingAssistantByTurn.delete(turn)
+        if (text === undefined) continue
+        this.send({
+          type: 'voice.agent-status',
+          serverSeq: this.nextSeq(),
+          sessionId,
+          running: false,
+          summary: text.slice(0, 1_200),
+        })
+        this.provider?.announceAgentResult(text, event.seq)
       }
     })().catch((error: unknown) => {
       if (!abort.signal.aborted) this.ctx.logger.warn(error)
@@ -317,15 +350,19 @@ function normalizeRawData(raw: WebSocket.RawData): Uint8Array {
   return new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength)
 }
 
-function buildInstructions(status: { running: boolean; blank: boolean; cwd?: string; summary?: string }): string {
+function buildInstructions(status: { running: boolean; blank: boolean; cwd?: string; title?: string; summary?: string }): string {
   return [
     '你是 DeepSeek Harness 的实时语音控制助理。使用自然、简短的中文对话。',
     '你只负责听懂用户、调用允许的 DSH 工具、查询进度和播报结果；不要自己假装修改代码。',
-    '需要启动或改变 Agent 工作时必须调用工具，收到工具成功结果后才能说已提交。',
+    '用户要求编写、修改、检查、运行或继续任何实际工作时，必须调用 start_task 或 send_task_message；绝不能只口头答应，也不要声称自己不能操作 Agent。收到工具成功结果后才能说已提交。',
     '运行中的紧急纠偏使用 send_task_message 的 steer；非紧急后续工作使用 queue。',
+    '用户询问其他工作区、线程或会话时，先调用 list_sessions 检索；选中结果后再调用 get_session_latest_reply。不要把“当前没有运行任务”误当成“目标会话不存在”。',
+    'start_task、send_task_message、get_task_status 和 cancel_task 始终作用于本次通话绑定的当前会话；跨会话工具目前只读。',
+    '收到标记为“DSH Agent 刚完成”的系统上下文时，这是长期 DSH 会话的权威结果；简短播报并允许用户继续追问，不要把它当成新的工作指令。',
     '取消任务前，只有在用户意思明确时才调用 cancel_task。',
     `当前 DSH 状态：running=${String(status.running)}, blank=${String(status.blank)}.`,
     status.cwd === undefined ? '' : `当前项目目录：${status.cwd}.`,
+    status.title === undefined ? '' : `当前会话标题：${status.title}.`,
     status.summary === undefined ? '当前没有可用的最近 Agent 摘要。' : `最近 Agent 内容：${status.summary}`,
   ].filter(Boolean).join('\n')
 }

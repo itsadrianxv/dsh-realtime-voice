@@ -25,13 +25,14 @@ export declare class VoiceConnection {
     private ready;
     private helloTimer;
     private hostEventsAbort;
+    private readonly pendingAssistantByTurn;
     constructor(ctx: Context, socket: WebSocket, request: IncomingMessage, config: VoiceConfig, onClosed: () => void);
     dispose(reason?: string): void;
     private receive;
     private start;
     private onProviderEvent;
     private runTool;
-    private followHostEvents;
+    private followDshEvents;
     private clearPlayback;
     private sendTranscript;
     private sendState;
