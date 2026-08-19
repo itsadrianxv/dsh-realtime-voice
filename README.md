@@ -60,6 +60,7 @@ dsh plugin --profile web remove @harness-remote/dsh-realtime-voice
 - DSH `0.1.0-rc.7` 官方 CLI 本地安装、卸载、重新安装
 - 原生 3080 WebUI 插槽：安装后按钮 1 个，卸载后 0 个，重装后恢复
 - `qwen-audio-3.0-realtime-plus` 真实建连、`voice.ready` 和 ping/pong
+- 合成语音完整回环：16 kHz PCM 上行、英文转写、`received` 回复及 24 kHz PCM 下行
 - 插件增删前后 28 个现有会话及最新会话 ID 保持一致
 - 协议、工具白名单/幂等、Function Calling 回写和 Host 生命周期自动化测试
 

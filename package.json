@@ -66,6 +66,7 @@
     "test": "vitest run",
     "verify": "node scripts/verify.mjs",
     "smoke:live": "node scripts/live-smoke.mjs",
+    "smoke:audio": "node scripts/live-audio-smoke.mjs",
     "pack:check": "pnpm pack --pack-destination .artifacts"
   },
   "engines": {
