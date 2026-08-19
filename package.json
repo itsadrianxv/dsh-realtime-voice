@@ -1,6 +1,6 @@
 {
   "name": "@harness-remote/dsh-realtime-voice",
-  "version": "0.1.0-alpha.5",
+  "version": "0.1.0-alpha.6",
   "description": "Hot-disposable realtime voice Agent plugin for DeepSeek Harness WebUI and future WeChat Mini Program clients",
   "keywords": [
     "deepseek-harness",
@@ -71,6 +71,7 @@
     "verify": "node scripts/verify.mjs",
     "smoke:live": "node scripts/live-smoke.mjs",
     "smoke:audio": "node scripts/live-audio-smoke.mjs",
+    "smoke:barge": "node scripts/live-barge-smoke.mjs",
     "pack:check": "pnpm pack --pack-destination .artifacts"
   },
   "engines": {

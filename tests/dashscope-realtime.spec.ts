@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events'
 import WebSocket from 'ws'
 import { describe, expect, it, vi } from 'vitest'
-import type { VoiceConfig } from '../src/host/config.ts'
+import { Config, type VoiceConfig } from '../src/host/config.ts'
 import { DashScopeRealtime } from '../src/host/dashscope-realtime.ts'
 
 const config: VoiceConfig = {
@@ -10,6 +10,7 @@ const config: VoiceConfig = {
   model: 'qwen-audio-3.0-realtime-plus',
   voice: 'longanqian',
   turnDetection: 'smart_turn',
+  vadThreshold: 0.35,
   silenceDurationMs: 600,
   maxHistoryTurns: 20,
   maxConnections: 4,
@@ -38,6 +39,29 @@ class FakeSocket extends EventEmitter {
 }
 
 describe('DashScope realtime provider', () => {
+  it('configures the fast VAD profile with the requested acoustic thresholds', async () => {
+    const socket = new FakeSocket()
+    const provider = new DashScopeRealtime(
+      new Config({}),
+      'secret-not-logged',
+      'voice instructions',
+      { onEvent: vi.fn(), onTool: vi.fn() },
+      (() => {
+        queueMicrotask(() => socket.event({ type: 'session.created' }))
+        return socket as unknown as WebSocket
+      }),
+    )
+
+    await provider.connect()
+    const update = socket.sent.find(message => message.type === 'session.update')
+    expect((update?.session as Record<string, unknown>).turn_detection).toEqual({
+      type: 'server_vad',
+      threshold: 0.35,
+      silence_duration_ms: 500,
+    })
+    provider.close()
+  })
+
   it('configures the quality model and returns all tool outputs before one follow-up response', async () => {
     const socket = new FakeSocket()
     const onTool = vi.fn(async (call) => ({ ok: true, output: JSON.stringify({ ok: true, callId: call.callId }) }))

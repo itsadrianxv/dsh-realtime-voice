@@ -65,7 +65,7 @@ export interface VoiceReady {
   voiceSessionId: string
   serverSeq: number
   target: { sessionId: string; running: boolean }
-  provider: { id: 'dashscope'; model: string; voice: string }
+  provider: { id: 'dashscope'; model: string; voice: string; turnDetection: 'server_vad' | 'smart_turn' }
   audio: {
     input: PcmAudioSpec
     output: PcmAudioSpec

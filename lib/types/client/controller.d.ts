@@ -11,6 +11,7 @@ export interface VoiceSnapshot {
     agentRunning: boolean;
     agentSummary?: string;
     providerModel?: string;
+    turnDetection?: 'server_vad' | 'smart_turn';
     elapsedSeconds: number;
     error?: string | undefined;
 }
@@ -43,6 +44,8 @@ export declare class VoiceCallController implements HostObservable<VoiceSnapshot
     private sendControl;
     private scheduleReconnect;
     private tick;
+    /** Stop audible output before the server-side VAD event completes its round trip. */
+    private handleLocalSpeechStart;
     private fail;
     private cleanup;
     private update;

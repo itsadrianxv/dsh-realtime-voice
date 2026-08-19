@@ -1,8 +1,11 @@
 import z from '@deepseek-ai/schemastery'
 import {
   DEFAULT_REALTIME_VOICE_MODEL,
+  DEFAULT_REALTIME_VOICE_TURN_DETECTION,
   REALTIME_VOICE_MODELS,
+  REALTIME_VOICE_TURN_DETECTION,
   type RealtimeVoiceModel,
+  type RealtimeVoiceTurnDetection,
 } from '../models.ts'
 
 /** Host-side realtime voice configuration; secrets are references, never values. */
@@ -11,7 +14,8 @@ export interface VoiceConfig {
   apiKeyEnv: string
   model: RealtimeVoiceModel
   voice: string
-  turnDetection: 'server_vad' | 'smart_turn'
+  turnDetection: RealtimeVoiceTurnDetection
+  vadThreshold: number
   silenceDurationMs: number
   maxHistoryTurns: number
   maxConnections: number
@@ -24,8 +28,12 @@ export const Config: z<VoiceConfig> = z.object({
   apiKeyEnv: z.string().default('DASHSCOPE_API_KEY'),
   model: z.union([REALTIME_VOICE_MODELS.flash, REALTIME_VOICE_MODELS.plus]).default(DEFAULT_REALTIME_VOICE_MODEL),
   voice: z.string().default('longanqian'),
-  turnDetection: z.union(['server_vad', 'smart_turn']).default('smart_turn'),
-  silenceDurationMs: z.natural().min(200).max(6000).default(600),
+  turnDetection: z.union([
+    REALTIME_VOICE_TURN_DETECTION.fast,
+    REALTIME_VOICE_TURN_DETECTION.semantic,
+  ]).default(DEFAULT_REALTIME_VOICE_TURN_DETECTION),
+  vadThreshold: z.number().min(-1).max(1).default(0.35),
+  silenceDurationMs: z.natural().min(200).max(6000).default(500),
   maxHistoryTurns: z.natural().min(1).max(50).default(20),
   maxConnections: z.natural().min(1).max(32).default(4),
   maxBinaryFrameBytes: z.natural().min(1024).max(1024 * 1024).default(64 * 1024),

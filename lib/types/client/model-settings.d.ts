@@ -1,15 +1,17 @@
 import type { SettingsScope } from '@deepseek-ai/dsh-client-runtime/client';
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots';
 import type { IApiClient } from '@deepseek-ai/dsh-client-connection/client';
-import { type RealtimeVoiceModel } from '../models.ts';
+import { type RealtimeVoiceModel, type RealtimeVoiceTurnDetection } from '../models.ts';
 export interface VoiceModelSettingsValue {
     model: RealtimeVoiceModel;
+    turnDetection: RealtimeVoiceTurnDetection;
     apiKeyEnv?: string;
 }
 export interface VoiceModelSettingsSnapshot {
     available: boolean;
     writable: boolean;
     model: RealtimeVoiceModel;
+    turnDetection: RealtimeVoiceTurnDetection;
     saving: boolean;
     error: string | undefined;
     apiKeyRef: string;
@@ -29,6 +31,7 @@ export declare class VoiceModelSettingsController implements HostObservable<Voic
     getSnapshot: () => VoiceModelSettingsSnapshot;
     subscribe: (listener: () => void) => (() => void);
     select(model: RealtimeVoiceModel): Promise<void>;
+    selectTurnDetection(turnDetection: RealtimeVoiceTurnDetection): Promise<void>;
     /** Write through DSH's write-only credential seam; the literal is never stored in this controller. */
     saveApiKey(value: string): Promise<boolean>;
     /** Refresh only when the Host reports that this card's credential changed. */

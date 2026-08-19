@@ -3,12 +3,16 @@ import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
 import type { IApiClient } from '@deepseek-ai/dsh-client-connection/client'
 import {
   DEFAULT_REALTIME_VOICE_MODEL,
+  DEFAULT_REALTIME_VOICE_TURN_DETECTION,
   isRealtimeVoiceModel,
+  isRealtimeVoiceTurnDetection,
   type RealtimeVoiceModel,
+  type RealtimeVoiceTurnDetection,
 } from '../models.ts'
 
 export interface VoiceModelSettingsValue {
   model: RealtimeVoiceModel
+  turnDetection: RealtimeVoiceTurnDetection
   apiKeyEnv?: string
 }
 
@@ -16,6 +20,7 @@ export interface VoiceModelSettingsSnapshot {
   available: boolean
   writable: boolean
   model: RealtimeVoiceModel
+  turnDetection: RealtimeVoiceTurnDetection
   saving: boolean
   error: string | undefined
   apiKeyRef: string
@@ -33,6 +38,7 @@ export class VoiceModelSettingsController implements HostObservable<VoiceModelSe
     available: false,
     writable: false,
     model: DEFAULT_REALTIME_VOICE_MODEL,
+    turnDetection: DEFAULT_REALTIME_VOICE_TURN_DETECTION,
     saving: false,
     error: undefined,
     apiKeyRef: DEFAULT_API_KEY_REF,
@@ -68,6 +74,26 @@ export class VoiceModelSettingsController implements HostObservable<VoiceModelSe
       const accepted = this.scope.getSnapshot().value?.model
       if (accepted !== model) throw new Error('DSH 没有接受该模型设置。')
       this.publish({ ...this.snapshot, model, saving: false, error: undefined })
+    } catch (error) {
+      this.publish({
+        ...this.snapshot,
+        saving: false,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  async selectTurnDetection(turnDetection: RealtimeVoiceTurnDetection): Promise<void> {
+    if (!this.snapshot.available
+      || !this.snapshot.writable
+      || this.snapshot.saving
+      || turnDetection === this.snapshot.turnDetection) return
+    this.publish({ ...this.snapshot, saving: true, error: undefined })
+    try {
+      await this.scope.set('turnDetection', turnDetection)
+      const accepted = this.scope.getSnapshot().value?.turnDetection
+      if (accepted !== turnDetection) throw new Error('DSH 没有接受该打断模式。')
+      this.publish({ ...this.snapshot, turnDetection, saving: false, error: undefined })
     } catch (error) {
       this.publish({
         ...this.snapshot,
@@ -113,13 +139,17 @@ export class VoiceModelSettingsController implements HostObservable<VoiceModelSe
   private adoptScope(): void {
     const scope = this.scope.getSnapshot()
     const model = scope.value?.model
+    const turnDetection = scope.value?.turnDetection
     const previousRef = this.snapshot.apiKeyRef
     const apiKeyRef = this.apiKeyRef()
     this.publish({
       ...this.snapshot,
-      available: scope.status === 'ready' && isRealtimeVoiceModel(model),
+      available: scope.status === 'ready'
+        && isRealtimeVoiceModel(model)
+        && isRealtimeVoiceTurnDetection(turnDetection),
       writable: scope.writable,
       ...(isRealtimeVoiceModel(model) ? { model } : {}),
+      ...(isRealtimeVoiceTurnDetection(turnDetection) ? { turnDetection } : {}),
       apiKeyRef,
       ...(apiKeyRef === previousRef ? {} : { apiKeyConfigured: false }),
     })
@@ -160,7 +190,12 @@ export function decodeVoiceModelSettings(value: unknown): VoiceModelSettingsValu
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
   const model = (value as Record<string, unknown>).model
   if (!isRealtimeVoiceModel(model)) return undefined
+  const rawTurnDetection = (value as Record<string, unknown>).turnDetection
+  const turnDetection = rawTurnDetection === undefined
+    ? DEFAULT_REALTIME_VOICE_TURN_DETECTION
+    : rawTurnDetection
+  if (!isRealtimeVoiceTurnDetection(turnDetection)) return undefined
   const apiKeyEnv = (value as Record<string, unknown>).apiKeyEnv
   if (apiKeyEnv !== undefined && (typeof apiKeyEnv !== 'string' || apiKeyEnv.trim() === '')) return undefined
-  return { model, ...(typeof apiKeyEnv === 'string' ? { apiKeyEnv } : {}) }
+  return { model, turnDetection, ...(typeof apiKeyEnv === 'string' ? { apiKeyEnv } : {}) }
 }

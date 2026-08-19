@@ -25,6 +25,7 @@ export interface VoiceSnapshot {
   agentRunning: boolean
   agentSummary?: string
   providerModel?: string
+  turnDetection?: 'server_vad' | 'smart_turn'
   elapsedSeconds: number
   error?: string | undefined
 }
@@ -73,7 +74,10 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
     this.lastReconnectError = undefined
     this.update({ ...INITIAL_SNAPSHOT, phase: 'requesting-permission', sessionId })
     try {
-      const audio = new BrowserAudioEngine(pcm => this.sendAudio(pcm))
+      const audio = new BrowserAudioEngine(
+        pcm => this.sendAudio(pcm),
+        () => this.handleLocalSpeechStart(),
+      )
       this.audio = audio
       await audio.start()
       this.startedAt = Date.now()
@@ -105,6 +109,7 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
   }
 
   cancelResponse(): void {
+    this.audio?.interruptPlayback()
     this.sendControl({ type: 'voice.cancel-response' })
   }
 
@@ -237,6 +242,7 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
           phase: 'listening',
           voiceSessionId: message.voiceSessionId,
           providerModel: message.provider.model,
+          turnDetection: message.provider.turnDetection,
           agentRunning: message.target.running,
           error: undefined,
         })
@@ -331,6 +337,16 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
   private tick(): void {
     if (this.startedAt === 0) return
     this.update({ ...this.snapshot, elapsedSeconds: Math.floor((Date.now() - this.startedAt) / 1000) })
+  }
+
+  /** Stop audible output before the server-side VAD event completes its round trip. */
+  private handleLocalSpeechStart(): void {
+    if (this.snapshot.phase !== 'speaking'
+      || this.snapshot.muted
+      || this.snapshot.turnDetection !== 'server_vad') return
+    this.audio?.interruptPlayback()
+    this.sendControl({ type: 'voice.cancel-response' })
+    this.update({ ...this.snapshot, phase: 'listening' })
   }
 
   private async fail(message: string): Promise<void> {

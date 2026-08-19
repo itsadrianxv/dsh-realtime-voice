@@ -1,8 +1,14 @@
 import type { HostObservable, InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
-import { useState } from 'react'
-import { realtimeVoiceModelLabel } from '../models.ts'
+import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
+import { realtimeVoiceModelLabel, realtimeVoiceTurnDetectionLabel } from '../models.ts'
 import type { VoiceSnapshot } from './controller.ts'
+import {
+  clampFloatingPosition,
+  defaultFloatingPosition,
+  moveFloatingPosition,
+  type FloatingPosition,
+} from './floating-position.ts'
 import styles from './voice.module.css'
 
 export interface VoiceOverlayInjected {
@@ -14,27 +20,149 @@ export interface VoiceOverlayInjected {
 }
 export type VoiceOverlayProps = PropsRuntime<'shell.overlay'> & InjectFace<VoiceOverlayInjected>
 
-/** Frame-wide call surface that remains visible while the user changes DSH sessions. */
+interface DragState {
+  pointerId: number
+  pointerStart: FloatingPosition
+  origin: FloatingPosition
+}
+
+/** Root-level movable call surface that remains visible while the user changes DSH sessions. */
 export function VoiceOverlay({ useVoice, useSessions, end, toggleMute, cancelResponse, openSession }: VoiceOverlayProps) {
   const voice = useVoice(snapshot => snapshot)
   const [collapsed, setCollapsed] = useState(false)
+  const [dragging, setDragging] = useState(false)
+  const [position, setPosition] = useState<FloatingPosition>()
+  const panelRef = useRef<HTMLElement>(null)
+  const dragRef = useRef<DragState>()
+  const movedRef = useRef(false)
   const boundSession = useSessions(state => voice.sessionId === undefined
     ? undefined
     : state.byId[voice.sessionId as SessionId])
   const currentSessionId = useSessions(state => state.current)
   const viewingOtherSession = voice.sessionId !== undefined && currentSessionId !== voice.sessionId
+
+  useEffect(() => {
+    if (voice.phase === 'requesting-permission') setCollapsed(false)
+  }, [voice.phase])
+
+  useEffect(() => {
+    const panel = panelRef.current
+    if (panel === null || voice.phase === 'idle') return
+    let frame = 0
+    const fit = () => {
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(() => {
+        const rect = panel.getBoundingClientRect()
+        const viewport = { width: window.innerWidth, height: window.innerHeight }
+        const size = { width: rect.width, height: rect.height }
+        setPosition(current => current === undefined
+          ? defaultFloatingPosition(viewport, size)
+          : clampFloatingPosition(current, viewport, size))
+      })
+    }
+    fit()
+    window.addEventListener('resize', fit)
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(fit)
+    observer?.observe(panel)
+    return () => {
+      cancelAnimationFrame(frame)
+      window.removeEventListener('resize', fit)
+      observer?.disconnect()
+    }
+  }, [collapsed, voice.phase])
+
+  const beginDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    if (event.button !== 0 || panelRef.current === null) return
+    if (!collapsed && (event.target as Element).closest('button') !== null) return
+    const rect = panelRef.current.getBoundingClientRect()
+    dragRef.current = {
+      pointerId: event.pointerId,
+      pointerStart: { x: event.clientX, y: event.clientY },
+      origin: { x: rect.left, y: rect.top },
+    }
+    movedRef.current = false
+    setDragging(true)
+    event.currentTarget.setPointerCapture(event.pointerId)
+    event.preventDefault()
+  }
+
+  const moveDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    const drag = dragRef.current
+    const panel = panelRef.current
+    if (drag === undefined || drag.pointerId !== event.pointerId || panel === null) return
+    if (Math.abs(event.clientX - drag.pointerStart.x) + Math.abs(event.clientY - drag.pointerStart.y) > 4) {
+      movedRef.current = true
+    }
+    const rect = panel.getBoundingClientRect()
+    setPosition(moveFloatingPosition(
+      drag.origin,
+      drag.pointerStart,
+      { x: event.clientX, y: event.clientY },
+      { width: window.innerWidth, height: window.innerHeight },
+      { width: rect.width, height: rect.height },
+    ))
+  }
+
+  const endDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    if (dragRef.current?.pointerId !== event.pointerId) return
+    dragRef.current = undefined
+    setDragging(false)
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+  }
+
   if (voice.phase === 'idle') return null
-  if (voice.phase === 'error') {
+  const floatingStyle: CSSProperties | undefined = position === undefined
+    ? undefined
+    : { left: position.x, top: position.y, right: 'auto', bottom: 'auto' }
+
+  if (collapsed && voice.phase !== 'error') {
     return (
-      <section className={`${styles.overlay} ${styles.overlayError}`} role="alert">
-        <div className={styles.errorText}>{voice.error}</div>
-        <button type="button" className={styles.secondaryButton} onClick={() => void end()}>关闭</button>
+      <section
+        ref={panelRef}
+        className={`${styles.voiceOrb} ${dragging ? styles.dragging : ''}`}
+        style={floatingStyle}
+        data-phase={voice.phase}
+        aria-label={`实时语音：${phaseText(voice.phase)}`}
+        onPointerDown={beginDrag}
+        onPointerMove={moveDrag}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+      >
+        <button
+          type="button"
+          className={styles.orbButton}
+          aria-label="展开实时语音"
+          title="拖动悬浮球；点击展开"
+          onClick={() => {
+            if (movedRef.current) {
+              movedRef.current = false
+              return
+            }
+            setCollapsed(false)
+          }}
+        >
+          <span className={styles.orbWaves} aria-hidden><i /><i /><i /><i /><i /></span>
+          <span className={styles.orbTime}>{formatElapsed(voice.elapsedSeconds)}</span>
+        </button>
       </section>
     )
   }
+
   return (
-    <section className={`${styles.overlay} ${collapsed ? styles.overlayCollapsed : ''}`} aria-label="实时语音通话">
-      <header className={styles.overlayHeader}>
+    <section
+      ref={panelRef}
+      className={`${styles.overlay} ${voice.phase === 'error' ? styles.overlayError : ''} ${dragging ? styles.dragging : ''}`}
+      style={floatingStyle}
+      aria-label="实时语音通话"
+    >
+      <header
+        className={`${styles.overlayHeader} ${styles.dragHandle}`}
+        title="拖动语音窗口"
+        onPointerDown={beginDrag}
+        onPointerMove={moveDrag}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+      >
         <div>
           <div className={styles.eyebrow}>DSH 实时语音</div>
           <div className={styles.phaseLine}>
@@ -44,16 +172,23 @@ export function VoiceOverlay({ useVoice, useSessions, end, toggleMute, cancelRes
         </div>
         <div className={styles.headerActions}>
           <div className={styles.agentState}>{voice.agentRunning ? 'Agent 工作中' : 'Agent 待命'}</div>
-          <button
-            type="button"
-            className={styles.iconButton}
-            aria-label={collapsed ? '展开通话面板' : '收起通话面板'}
-            title={collapsed ? '展开' : '收起'}
-            onClick={() => setCollapsed(value => !value)}
-          >{collapsed ? '‹' : '›'}</button>
+          {voice.phase === 'error' ? null : (
+            <button
+              type="button"
+              className={styles.iconButton}
+              aria-label="收起为悬浮球"
+              title="收起为悬浮球"
+              onClick={() => setCollapsed(true)}
+            >−</button>
+          )}
         </div>
       </header>
-      {collapsed ? null : (
+      {voice.phase === 'error' ? (
+        <>
+          <div className={styles.errorText}>{voice.error}</div>
+          <button type="button" className={styles.secondaryButton} onClick={() => void end()}>关闭</button>
+        </>
+      ) : (
         <>
           <div className={styles.bindingCard}>
             <div className={styles.bindingLabel}>本次通话一对一绑定</div>
@@ -61,6 +196,7 @@ export function VoiceOverlay({ useVoice, useSessions, end, toggleMute, cancelRes
             <div className={styles.bindingMeta}>
               {boundSession?.blank === true ? '空白新会话 · 首个 Agent 指令会写入第一轮' : '工作指令与 Agent 结果保存在此线程'}
               {' · '}{realtimeVoiceModelLabel(voice.providerModel)}
+              {' · '}{realtimeVoiceTurnDetectionLabel(voice.turnDetection)}
             </div>
             {viewingOtherSession ? (
               <button type="button" className={styles.returnLink} onClick={() => openSession(voice.sessionId!)}>
@@ -86,7 +222,7 @@ export function VoiceOverlay({ useVoice, useSessions, end, toggleMute, cancelRes
             <button type="button" className={styles.secondaryButton} onClick={toggleMute}>
               {voice.muted ? '取消静音' : '静音'}
             </button>
-            <button type="button" className={styles.secondaryButton} onClick={cancelResponse}>打断播报</button>
+            <button type="button" className={styles.secondaryButton} onClick={cancelResponse}>立即打断</button>
             {voice.sessionId === undefined || !viewingOtherSession ? null : (
               <button type="button" className={styles.secondaryButton} onClick={() => openSession(voice.sessionId!)}>返回任务</button>
             )}

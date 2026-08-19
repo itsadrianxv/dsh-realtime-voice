@@ -9,6 +9,7 @@ const config: VoiceConfig = {
   model: 'qwen-audio-3.0-realtime-plus',
   voice: 'longanqian',
   turnDetection: 'smart_turn',
+  vadThreshold: 0.35,
   silenceDurationMs: 600,
   maxHistoryTurns: 20,
   maxConnections: 4,

@@ -2,17 +2,18 @@
 
 DeepSeek Harness 官方插件形态的实时语音 Agent：安装后在 WebUI 输入框旁出现拨打按钮，用户可持续对话、打断播报、询问进度，并用语音启动、追加、纠正或停止当前 DSH Agent 工作。
 
-当前版本：`0.1.0-alpha.5`，目标 DSH：`0.1.0-rc.7`。
+当前版本：`0.1.0-alpha.6`，目标 DSH：`0.1.0-rc.7`。
 
 本包同时声明 DSH bundle、Host 插件和“原生 WebUI 浏览器侧”插件。这里不是另做一个网站：UI 直接注入 DSH 自带的 `http://127.0.0.1:3080`，不新增页面或 UI 端口。它不修改 DSH 源码，不另起后台进程；卸载或禁用时会移除 UI/路由并关闭麦克风、音频、浏览器 WebSocket 和百炼连接，已经交给 DSH 的任务继续运行。
 
 ## 当前能力
 
 - DSH 原生 3080 WebUI：拨号按钮位于发送按钮右侧，使用同尺寸、同色系的通话图标
-- 宽屏右侧独立浮动通话栏（中央 Agent 消息区自动让位），窄屏降级为可收起底部浮层
+- 独立可拖动语音浮窗；可在任意位置展开使用，也可收起为带动态波形和计时的悬浮球
 - “设置 → 插件 → DSH 实时语音”内一键切换 Qwen Audio Realtime Flash/Plus；下一通生效，不中断当前通话
+- “快速声学打断 / 智能语义轮次”可切换；快速模式采用浏览器本地起音检测、立即停播、Host 显式取消和百炼 VAD 三层打断
 - 自动识别 `DASHSCOPE_API_KEY`，也可在插件设置中通过 DSH 官方 credentials 安全写入或替换；浏览器不可回读明文
-- `smart_turn`/服务端 VAD、实时转写、流式 PCM 播放、用户打断
+- 默认低延迟 `server_vad`（阈值 0.35、静音 500ms），可选 `smart_turn`；实时转写、流式 PCM 播放、用户全双工打断
 - Function Calling 到官方 DSH `apiProxy`：开始、queue/steer、状态、取消
 - 按工作区/标题检索其他 DSH 会话，并读取指定会话最后一条 Agent 回复
 - 双层上下文闭环：工作指令进入持久 DSH 会话，`turn/end` 的最终 Agent 回复回灌语音上下文并主动播报
@@ -49,7 +50,7 @@ dsh plugin --profile web add .
 首个可用版验证完成并发布 GitHub tag 后：
 
 ```powershell
-dsh plugin --profile web add github:martinbear1/dsh-realtime-voice#v0.1.0-alpha.5
+dsh plugin --profile web add github:martinbear1/dsh-realtime-voice#v0.1.0-alpha.6
 ```
 
 发布包会提交预构建 `lib/`，不使用会触发 pnpm `allowBuilds` 的 `prepare`，以保持一条命令安装。
@@ -76,6 +77,8 @@ dsh plugin --profile web remove @harness-remote/dsh-realtime-voice
 - `qwen-audio-3.0-realtime-plus` 真实建连、`voice.ready` 和 ping/pong
 - 合成语音完整回环：16 kHz PCM 上行、英文转写、`received` 回复及 24 kHz PCM 下行
 - 真实 `ws` 成功回调兼容：首个下行音频包不会被误判为发送失败；助手流式字幕按增量完整拼接
+- 本地起音约 80ms 后先清空播放，Host 对同一响应只取消一次；VAD 云端事件继续作为权威兜底
+- 悬浮窗口拖拽坐标自动限制在视口内，窗口缩放与展开/收起时不会丢出屏幕
 - 插件增删前后 28 个现有会话及最新会话 ID 保持一致
 - 协议、工具白名单/幂等、Function Calling 回写和 Host 生命周期自动化测试
 

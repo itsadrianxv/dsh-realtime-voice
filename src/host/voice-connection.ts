@@ -110,8 +110,7 @@ export class VoiceConnection {
         this.dispose('client-ended')
         return
       case 'voice.cancel-response':
-        this.provider?.cancelResponse()
-        this.clearPlayback('cancelled')
+        this.interruptActiveResponse('cancelled', true)
         return
       case 'voice.commit':
         this.provider?.commitAudio()
@@ -152,7 +151,12 @@ export class VoiceConnection {
       voiceSessionId: this.id,
       serverSeq: this.nextSeq(),
       target: { sessionId: hello.target.sessionId, running: status.running },
-      provider: { id: 'dashscope', model: this.config.model, voice: this.config.voice },
+      provider: {
+        id: 'dashscope',
+        model: this.config.model,
+        voice: this.config.voice,
+        turnDetection: this.config.turnDetection,
+      },
       audio: {
         input: { encoding: 'pcm_s16le', sampleRate: INPUT_SAMPLE_RATE, channels: AUDIO_CHANNELS, frameDurationMs: 40 },
         output: { encoding: 'pcm_s16le', sampleRate: OUTPUT_SAMPLE_RATE, channels: AUDIO_CHANNELS, frameDurationMs: 40 },
@@ -168,8 +172,10 @@ export class VoiceConnection {
     if (this.closed) return
     switch (event.type) {
       case 'input_audio_buffer.speech_started':
-        if (this.activeResponseId !== undefined) this.suppressedResponses.add(this.activeResponseId)
-        this.clearPlayback('barge-in')
+        // Qwen has already detected this turn and automatically cancels the
+        // active response. Only suppress/clear here; a second response.cancel
+        // would race and can yield "Conversation has no active response".
+        this.interruptActiveResponse('barge-in', false)
         this.sendState('listening')
         return
       case 'input_audio_buffer.speech_stopped':
@@ -189,7 +195,8 @@ export class VoiceConnection {
       }
       case 'response.audio.delta': {
         const responseId = optionalField(event, 'response_id')
-        if (responseId !== undefined && this.suppressedResponses.has(responseId)) return
+        const effectiveResponseId = responseId ?? this.activeResponseId
+        if (effectiveResponseId !== undefined && this.suppressedResponses.has(effectiveResponseId)) return
         const audio = Buffer.from(field(event, 'delta'), 'base64')
         const sequence = this.outputSeq++
         const frame = encodeAudioFrame(
@@ -233,6 +240,7 @@ export class VoiceConnection {
       case 'error': {
         const error = event.error as Record<string, unknown> | undefined
         const message = typeof error?.message === 'string' ? error.message : '百炼实时语音服务返回错误。'
+        if (/no active response/i.test(message) && this.suppressedResponses.size > 0) return
         this.ctx.logger.warn(`[realtime-voice] provider error: ${message}`)
         this.fail('provider-error', message, true)
         return
@@ -308,6 +316,22 @@ export class VoiceConnection {
     this.outputSeq = 0
     this.outputPtsMs = 0
     this.send({ type: 'voice.playback-clear', serverSeq: this.nextSeq(), streamId: this.outputStreamId, reason })
+  }
+
+  /** Stop one response exactly once, even when local and provider VAD race. */
+  private interruptActiveResponse(reason: 'barge-in' | 'cancelled', cancelProvider: boolean): void {
+    const responseId = this.activeResponseId
+    if (responseId !== undefined) {
+      if (this.suppressedResponses.has(responseId)) return
+      this.suppressedResponses.add(responseId)
+    }
+    this.clearPlayback(reason)
+    if (responseId === undefined || !cancelProvider) return
+    try {
+      this.provider?.cancelResponse()
+    } catch (error) {
+      this.ctx.logger.warn(`[realtime-voice] response cancellation raced with transport close: ${String(error)}`)
+    }
   }
 
   private sendTranscript(role: 'user' | 'assistant', final: boolean, text: string, stash?: string): void {

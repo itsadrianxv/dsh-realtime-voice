@@ -8,6 +8,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
 import {
   REALTIME_VOICE_SETTINGS_NAMESPACE,
   type RealtimeVoiceModel,
+  type RealtimeVoiceTurnDetection,
 } from '../models.ts'
 import { VoiceCallController } from './controller.ts'
 import { decodeVoiceModelSettings, VoiceModelSettingsController } from './model-settings.ts'
@@ -73,6 +74,7 @@ export function apply(ctx: ClientContext): void {
     inject: (): VoiceSettingsCardInjected => ({
       hooks: { voiceModelSettings: modelSettings },
       selectModel: (model: RealtimeVoiceModel) => { void modelSettings.select(model) },
+      selectTurnDetection: (mode: RealtimeVoiceTurnDetection) => { void modelSettings.selectTurnDetection(mode) },
       saveApiKey: (value: string) => modelSettings.saveApiKey(value),
     }),
   }, VoiceSettingsCard))

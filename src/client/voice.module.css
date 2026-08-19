@@ -52,8 +52,8 @@
   position: fixed;
   top: 72px;
   right: 20px;
-  bottom: 20px;
   width: min(372px, calc(100vw - 40px));
+  max-height: min(620px, calc(100vh - 24px));
   display: flex;
   flex-direction: column;
   padding: 16px;
@@ -64,21 +64,104 @@
   box-shadow: 0 18px 56px rgb(0 0 0 / 18%);
   backdrop-filter: blur(18px);
   overflow: hidden;
-  transition: width 160ms ease, bottom 160ms ease;
-}
-
-.overlayCollapsed {
-  bottom: auto;
-  width: 292px;
+  will-change: left, top;
 }
 
 .overlayError {
-  top: auto;
-  bottom: 20px;
   width: min(372px, calc(100vw - 40px));
+  gap: 14px;
+}
+
+.dragHandle,
+.voiceOrb {
+  touch-action: none;
+  user-select: none;
+  cursor: grab;
+}
+
+.dragging,
+.dragging .dragHandle {
+  cursor: grabbing;
+  transition: none !important;
+}
+
+.voiceOrb {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  width: 76px;
+  height: 76px;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-brand-primary, #3964fe) 45%, transparent);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--dsw-alias-surface-primary, #fff) 88%, transparent);
+  box-shadow: 0 14px 38px rgb(0 0 0 / 22%), 0 0 0 6px color-mix(in srgb, var(--dsw-alias-brand-primary, #3964fe) 10%, transparent);
+  backdrop-filter: blur(18px);
+  overflow: hidden;
+  will-change: left, top;
+}
+
+.voiceOrb[data-phase="speaking"] {
+  box-shadow: 0 14px 38px rgb(0 0 0 / 22%), 0 0 0 8px color-mix(in srgb, var(--dsw-alias-brand-primary, #3964fe) 17%, transparent);
+}
+
+.orbButton {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-content: center;
+  gap: 5px;
+  padding: 0;
+  border: 0;
+  border-radius: inherit;
+  color: #fff;
+  background: radial-gradient(circle at 35% 28%, #7390ff 0, #3964fe 44%, #2747c9 100%);
+  cursor: inherit;
+}
+
+.orbWaves {
+  height: 22px;
   display: flex;
   align-items: center;
-  gap: 14px;
+  justify-content: center;
+  gap: 3px;
+}
+
+.orbWaves i {
+  width: 3px;
+  height: 8px;
+  display: block;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: .92;
+  animation: voice-wave 850ms ease-in-out infinite alternate;
+}
+
+.orbWaves i:nth-child(2),
+.orbWaves i:nth-child(4) {
+  height: 15px;
+  animation-delay: -240ms;
+}
+
+.orbWaves i:nth-child(3) {
+  height: 21px;
+  animation-delay: -420ms;
+}
+
+.voiceOrb[data-phase="listening"] .orbWaves i,
+.voiceOrb[data-phase="agent-working"] .orbWaves i {
+  animation-duration: 1250ms;
+}
+
+.orbTime {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  opacity: .86;
+}
+
+@keyframes voice-wave {
+  from { transform: scaleY(.55); opacity: .62; }
+  to { transform: scaleY(1.15); opacity: 1; }
 }
 
 .overlayHeader,
@@ -87,6 +170,12 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+}
+
+.overlayHeader {
+  margin: -8px -8px 0;
+  padding: 8px;
+  border-radius: 12px;
 }
 
 .headerActions {
@@ -185,6 +274,7 @@
   align-content: start;
   gap: 12px;
   min-height: 120px;
+  max-height: 230px;
   margin: 14px 0;
   padding: 2px 4px 2px 2px;
   overflow-y: auto;
@@ -384,6 +474,12 @@
   line-height: 1.5;
 }
 
+.settingsSubsection {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--dsw-alias-border-l2, var(--dsw-alias-border-subtle));
+}
+
 .settingsError {
   color: var(--dsw-alias-label-error, #d13438);
 }
@@ -458,22 +554,6 @@
   cursor: default;
 }
 
-/* On desktop, reserve a real rail inside the DSH frame so the fixed voice
-   surface floats at the right without painting over the Agent transcript.
-   The frame is selected only while this plugin's own overlay is mounted;
-   uninstalling the client bundle removes both the node and this rule. */
-@media (min-width: 1200px) {
-  :global(div:has(> [data-shell-overlay])):has(.overlay:not(.overlayCollapsed)) {
-    box-sizing: border-box;
-    padding-right: 412px;
-  }
-
-  :global(div:has(> [data-shell-overlay])):has(.overlayCollapsed) {
-    box-sizing: border-box;
-    padding-right: 324px;
-  }
-}
-
 @media (max-width: 1199px) {
   .overlay {
     top: auto;
@@ -485,8 +565,9 @@
     border-radius: 16px;
   }
 
-  .overlayCollapsed {
-    width: min(292px, calc(100vw - 24px));
+  .voiceOrb {
+    right: 12px;
+    bottom: 12px;
   }
 
   .controls {

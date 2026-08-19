@@ -125,7 +125,7 @@ function ready(voiceSessionId: string) {
     voiceSessionId,
     serverSeq: 1,
     target: { sessionId: 'session-test', running: false },
-    provider: { id: 'dashscope', model: 'test', voice: 'test' },
+    provider: { id: 'dashscope', model: 'test', voice: 'test', turnDetection: 'server_vad' },
     audio: {
       input: { encoding: 'pcm_s16le', sampleRate: 16_000, channels: 1, frameDurationMs: 40 },
       output: { encoding: 'pcm_s16le', sampleRate: 24_000, channels: 1, frameDurationMs: 40 },

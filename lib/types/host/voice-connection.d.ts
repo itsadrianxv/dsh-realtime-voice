@@ -34,6 +34,8 @@ export declare class VoiceConnection {
     private runTool;
     private followDshEvents;
     private clearPlayback;
+    /** Stop one response exactly once, even when local and provider VAD race. */
+    private interruptActiveResponse;
     private sendTranscript;
     private sendState;
     private fail;

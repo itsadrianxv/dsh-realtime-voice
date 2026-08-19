@@ -64,6 +64,7 @@ export interface VoiceReady {
         id: 'dashscope';
         model: string;
         voice: string;
+        turnDetection: 'server_vad' | 'smart_turn';
     };
     audio: {
         input: PcmAudioSpec;

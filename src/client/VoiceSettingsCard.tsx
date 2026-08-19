@@ -3,7 +3,9 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
 import { useState } from 'react'
 import {
   REALTIME_VOICE_MODELS,
+  REALTIME_VOICE_TURN_DETECTION,
   type RealtimeVoiceModel,
+  type RealtimeVoiceTurnDetection,
 } from '../models.ts'
 import type { VoiceModelSettingsSnapshot } from './model-settings.ts'
 import styles from './voice.module.css'
@@ -11,6 +13,7 @@ import styles from './voice.module.css'
 export interface VoiceSettingsCardInjected {
   hooks: { voiceModelSettings: HostObservable<VoiceModelSettingsSnapshot> }
   selectModel: (model: RealtimeVoiceModel) => void
+  selectTurnDetection: (mode: RealtimeVoiceTurnDetection) => void
   saveApiKey: (value: string) => Promise<boolean>
 }
 
@@ -18,7 +21,12 @@ export type VoiceSettingsCardProps =
   PropsRuntime<'settings.plugin.item'> & InjectFace<VoiceSettingsCardInjected>
 
 /** One native Plugins-settings card. Changes persist immediately and affect the next call. */
-export function VoiceSettingsCard({ useVoiceModelSettings, selectModel, saveApiKey }: VoiceSettingsCardProps) {
+export function VoiceSettingsCard({
+  useVoiceModelSettings,
+  selectModel,
+  selectTurnDetection,
+  saveApiKey,
+}: VoiceSettingsCardProps) {
   const state = useVoiceModelSettings(snapshot => snapshot)
   const [apiKey, setApiKey] = useState('')
   if (!state.available) return null
@@ -53,6 +61,26 @@ export function VoiceSettingsCard({ useVoiceModelSettings, selectModel, saveApiK
         <p className={styles.settingsHint}>
           {state.saving ? '正在保存…' : '设置即时保存，从下一通电话开始生效；不会中断正在进行的通话。'}
         </p>
+        <div className={styles.settingsSubsection}>
+          <div className={styles.settingsLabel}>VAD 打断方式</div>
+          <div className={styles.modelSwitch} role="radiogroup" aria-label="VAD 打断方式">
+            <ModelChoice
+              title="快速打断"
+              detail="声学 VAD + 本地停播 · 推荐"
+              selected={state.turnDetection === REALTIME_VOICE_TURN_DETECTION.fast}
+              disabled={disabled}
+              onClick={() => selectTurnDetection(REALTIME_VOICE_TURN_DETECTION.fast)}
+            />
+            <ModelChoice
+              title="智能轮次"
+              detail="过滤附和与背景音 · 更保守"
+              selected={state.turnDetection === REALTIME_VOICE_TURN_DETECTION.semantic}
+              disabled={disabled}
+              onClick={() => selectTurnDetection(REALTIME_VOICE_TURN_DETECTION.semantic)}
+            />
+          </div>
+          <p className={styles.settingsHint}>快速打断会在检测到你开口后立即清空本地播报，并取消云端旧响应。</p>
+        </div>
         {state.error === undefined ? null : <p className={styles.settingsError} role="alert">{state.error}</p>}
         {state.writable ? null : <p className={styles.settingsHint}>当前连接不能修改主机设置，请在本机 3080 WebUI 中操作。</p>}
         <div className={styles.credentialSection}>

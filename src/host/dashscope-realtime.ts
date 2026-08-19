@@ -160,7 +160,7 @@ export class DashScopeRealtime {
                 turn_detection: this.config.turnDetection === 'server_vad'
                   ? {
                       type: 'server_vad',
-                      threshold: 0.5,
+                      threshold: this.config.vadThreshold,
                       silence_duration_ms: this.config.silenceDurationMs,
                     }
                   : { type: 'smart_turn' },

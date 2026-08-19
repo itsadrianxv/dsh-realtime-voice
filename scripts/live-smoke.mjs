@@ -46,7 +46,7 @@ await new Promise((resolve, reject) => {
     }
     if (message.type === 'voice.ready') {
       ready = true
-      console.log(`voice.ready model=${message.provider.model} session=${message.target.sessionId}`)
+      console.log(`voice.ready model=${message.provider.model} vad=${message.provider.turnDetection} session=${message.target.sessionId}`)
       socket.send(JSON.stringify({ type: 'voice.ping', sentAt: 1 }))
       return
     }

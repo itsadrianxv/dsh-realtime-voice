@@ -1,5 +1,6 @@
 import { AUDIO_CHANNELS, INPUT_SAMPLE_RATE, OUTPUT_SAMPLE_RATE } from '../protocol.ts'
 import { AUDIO_WORKLET_SOURCE } from './audio-worklet-source.ts'
+import { LocalVoiceActivityDetector } from './local-vad.ts'
 
 /** Browser microphone capture and streaming PCM playback; owns every browser media resource it creates. */
 export class BrowserAudioEngine {
@@ -8,8 +9,13 @@ export class BrowserAudioEngine {
   private capture: AudioWorkletNode | undefined
   private playback: AudioWorkletNode | undefined
   private moduleUrl: string | undefined
+  private playbackEpoch = 0
+  private readonly localVad = new LocalVoiceActivityDetector()
 
-  constructor(private readonly onInput: (pcm: ArrayBuffer) => void) {}
+  constructor(
+    private readonly onInput: (pcm: ArrayBuffer) => void,
+    private readonly onSpeechStart: () => void = () => {},
+  ) {}
 
   async start(): Promise<void> {
     this.stream = await navigator.mediaDevices.getUserMedia({
@@ -35,7 +41,10 @@ export class BrowserAudioEngine {
     silent.gain.value = 0
     source.connect(capture)
     capture.connect(silent).connect(context.destination)
-    capture.port.onmessage = (event: MessageEvent<ArrayBuffer>) => this.onInput(event.data)
+    capture.port.onmessage = (event: MessageEvent<ArrayBuffer>) => {
+      if (this.localVad.push(event.data)) this.onSpeechStart()
+      this.onInput(event.data)
+    }
     this.capture = capture
     const playback = new AudioWorkletNode(context, 'dsh-voice-playback', {
       numberOfInputs: 0,
@@ -49,12 +58,19 @@ export class BrowserAudioEngine {
   }
 
   play(pcm: Uint8Array, epoch: number): void {
+    this.playbackEpoch = Math.max(this.playbackEpoch, epoch)
     const transferable = pcm.slice().buffer
     this.playback?.port.postMessage({ type: 'audio', epoch, pcm: transferable }, [transferable])
   }
 
   clear(epoch: number): void {
+    this.playbackEpoch = epoch
     this.playback?.port.postMessage({ type: 'clear', epoch })
+  }
+
+  /** Synchronous local barge-in; Host will confirm the same next stream epoch. */
+  interruptPlayback(): void {
+    this.clear(this.playbackEpoch + 1)
   }
 
   setMuted(muted: boolean): void {
@@ -68,6 +84,8 @@ export class BrowserAudioEngine {
     this.playback?.disconnect()
     this.capture = undefined
     this.playback = undefined
+    this.playbackEpoch = 0
+    this.localVad.reset()
     if (this.context !== undefined && this.context.state !== 'closed') await this.context.close()
     this.context = undefined
     if (this.moduleUrl !== undefined) URL.revokeObjectURL(this.moduleUrl)

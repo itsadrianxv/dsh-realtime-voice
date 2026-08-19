@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { SettingsScope, SettingsScopeSnapshot } from '@deepseek-ai/dsh-client-runtime/client'
 import { Config } from '../src/host/config.ts'
-import { REALTIME_VOICE_MODELS } from '../src/models.ts'
+import { REALTIME_VOICE_MODELS, REALTIME_VOICE_TURN_DETECTION } from '../src/models.ts'
 import {
   decodeVoiceModelSettings,
   VoiceModelSettingsController,
@@ -11,6 +11,8 @@ import {
 describe('realtime voice model settings', () => {
   it('admits only the two provider-compatible realtime models', () => {
     expect(new Config({}).model).toBe(REALTIME_VOICE_MODELS.plus)
+    expect(new Config({}).turnDetection).toBe(REALTIME_VOICE_TURN_DETECTION.fast)
+    expect(new Config({}).vadThreshold).toBe(0.35)
     expect(new Config({ model: REALTIME_VOICE_MODELS.flash }).model).toBe(REALTIME_VOICE_MODELS.flash)
     expect(() => new Config({ model: 'unrelated-model' as never })).toThrow()
   })
@@ -24,8 +26,12 @@ describe('realtime voice model settings', () => {
         listeners.add(listener)
         return () => listeners.delete(listener)
       },
-      set: vi.fn(async (_field: string, value: unknown) => {
-        snapshot = ready(value as VoiceModelSettingsValue['model'])
+      set: vi.fn(async (field: string, value: unknown) => {
+        const current = snapshot.value!
+        snapshot = ready(
+          field === 'model' ? value as VoiceModelSettingsValue['model'] : current.model,
+          field === 'turnDetection' ? value as VoiceModelSettingsValue['turnDetection'] : current.turnDetection,
+        )
         for (const listener of listeners) listener()
       }),
       unset: vi.fn(),
@@ -48,6 +54,10 @@ describe('realtime voice model settings', () => {
       model: REALTIME_VOICE_MODELS.flash,
       saving: false,
     })
+
+    await controller.selectTurnDetection(REALTIME_VOICE_TURN_DETECTION.semantic)
+    expect(scope.set).toHaveBeenCalledWith('turnDetection', REALTIME_VOICE_TURN_DETECTION.semantic)
+    expect(controller.getSnapshot().turnDetection).toBe(REALTIME_VOICE_TURN_DETECTION.semantic)
     controller.dispose()
   })
 
@@ -75,18 +85,35 @@ describe('realtime voice model settings', () => {
   })
 
   it('rejects malformed browser settings snapshots', () => {
-    expect(decodeVoiceModelSettings({ model: REALTIME_VOICE_MODELS.flash })).toEqual({ model: REALTIME_VOICE_MODELS.flash })
+    expect(decodeVoiceModelSettings({ model: REALTIME_VOICE_MODELS.flash })).toEqual({
+      model: REALTIME_VOICE_MODELS.flash,
+      turnDetection: REALTIME_VOICE_TURN_DETECTION.fast,
+    })
+    expect(decodeVoiceModelSettings({
+      model: REALTIME_VOICE_MODELS.flash,
+      turnDetection: REALTIME_VOICE_TURN_DETECTION.semantic,
+    })).toEqual({
+      model: REALTIME_VOICE_MODELS.flash,
+      turnDetection: REALTIME_VOICE_TURN_DETECTION.semantic,
+    })
+    expect(decodeVoiceModelSettings({
+      model: REALTIME_VOICE_MODELS.flash,
+      turnDetection: 'unknown',
+    })).toBeUndefined()
     expect(decodeVoiceModelSettings({ model: 'other' })).toBeUndefined()
     expect(decodeVoiceModelSettings(null)).toBeUndefined()
   })
 })
 
-function ready(model: VoiceModelSettingsValue['model']): SettingsScopeSnapshot<VoiceModelSettingsValue> {
+function ready(
+  model: VoiceModelSettingsValue['model'],
+  turnDetection: VoiceModelSettingsValue['turnDetection'] = REALTIME_VOICE_TURN_DETECTION.fast,
+): SettingsScopeSnapshot<VoiceModelSettingsValue> {
   return {
     status: 'ready',
-    value: { model },
-    base: { model: REALTIME_VOICE_MODELS.plus },
-    user: { model },
+    value: { model, turnDetection },
+    base: { model: REALTIME_VOICE_MODELS.plus, turnDetection: REALTIME_VOICE_TURN_DETECTION.fast },
+    user: { model, turnDetection },
     revision: 1,
     writable: true,
     mode: 'host',
