@@ -19,6 +19,7 @@ import {
 import type { VoiceConfig } from './config.ts'
 import { DashScopeRealtime, type DashScopeServerEvent } from './dashscope-realtime.ts'
 import { assistantText, DshVoiceTools, type VoiceToolCall } from './dsh-tools.ts'
+import { isWebSocketSendError } from './websocket-send.ts'
 
 /** One browser or Mini Program call, pinned to one DSH session for its full lifetime. */
 export class VoiceConnection {
@@ -201,7 +202,7 @@ export class VoiceConnection {
         this.outputPtsMs += audio.byteLength / 2 / OUTPUT_SAMPLE_RATE * 1000
         if (this.socket.readyState !== this.socket.OPEN) return
         this.socket.send(frame, { binary: true }, (error) => {
-          if (error !== undefined && !this.closed) this.dispose('browser-audio-send-failed')
+          if (isWebSocketSendError(error) && !this.closed) this.dispose('browser-audio-send-failed')
         })
         this.sendState('speaking')
         return

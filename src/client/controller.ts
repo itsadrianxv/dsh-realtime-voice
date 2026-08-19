@@ -242,13 +242,24 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
         })
         return
       case 'voice.state':
-        this.update({ ...this.snapshot, phase: message.phase })
+        this.update({
+          ...this.snapshot,
+          phase: message.phase,
+          ...(message.phase === 'thinking' && this.snapshot.phase !== 'thinking'
+            ? { assistantTranscript: '' }
+            : {}),
+        })
         return
       case 'voice.transcript':
         if (message.role === 'user') {
           this.update({ ...this.snapshot, userTranscript: message.text + (message.stash ?? '') })
         } else {
-          this.update({ ...this.snapshot, assistantTranscript: message.text })
+          this.update({
+            ...this.snapshot,
+            assistantTranscript: message.final
+              ? message.text
+              : this.snapshot.assistantTranscript + message.text,
+          })
         }
         return
       case 'voice.playback-clear':

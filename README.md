@@ -2,7 +2,7 @@
 
 DeepSeek Harness 官方插件形态的实时语音 Agent：安装后在 WebUI 输入框旁出现拨打按钮，用户可持续对话、打断播报、询问进度，并用语音启动、追加、纠正或停止当前 DSH Agent 工作。
 
-当前版本：`0.1.0-alpha.4`，目标 DSH：`0.1.0-rc.7`。
+当前版本：`0.1.0-alpha.5`，目标 DSH：`0.1.0-rc.7`。
 
 本包同时声明 DSH bundle、Host 插件和“原生 WebUI 浏览器侧”插件。这里不是另做一个网站：UI 直接注入 DSH 自带的 `http://127.0.0.1:3080`，不新增页面或 UI 端口。它不修改 DSH 源码，不另起后台进程；卸载或禁用时会移除 UI/路由并关闭麦克风、音频、浏览器 WebSocket 和百炼连接，已经交给 DSH 的任务继续运行。
 
@@ -49,7 +49,7 @@ dsh plugin --profile web add .
 首个可用版验证完成并发布 GitHub tag 后：
 
 ```powershell
-dsh plugin --profile web add github:martinbear1/dsh-realtime-voice#v0.1.0-alpha.4
+dsh plugin --profile web add github:martinbear1/dsh-realtime-voice#v0.1.0-alpha.5
 ```
 
 发布包会提交预构建 `lib/`，不使用会触发 pnpm `allowBuilds` 的 `prepare`，以保持一条命令安装。
@@ -75,6 +75,7 @@ dsh plugin --profile web remove @harness-remote/dsh-realtime-voice
 - 现有 Agent 会话与所选工作区空白新会话均出现拨号入口；无工作区时不创建隐式任务会话
 - `qwen-audio-3.0-realtime-plus` 真实建连、`voice.ready` 和 ping/pong
 - 合成语音完整回环：16 kHz PCM 上行、英文转写、`received` 回复及 24 kHz PCM 下行
+- 真实 `ws` 成功回调兼容：首个下行音频包不会被误判为发送失败；助手流式字幕按增量完整拼接
 - 插件增删前后 28 个现有会话及最新会话 ID 保持一致
 - 协议、工具白名单/幂等、Function Calling 回写和 Host 生命周期自动化测试
 
