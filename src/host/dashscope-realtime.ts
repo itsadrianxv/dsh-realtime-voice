@@ -139,48 +139,53 @@ export class DashScopeRealtime {
           settled = true
           reject(error)
         } else if (!this.closed) {
-          this.callbacks.onEvent({ type: 'error', error: { type: 'transport_error', message: error.message } })
+          this.emitEvent({ type: 'error', error: { type: 'transport_error', message: error.message } })
         }
       }
       socket.on('error', fail)
       socket.on('message', (raw) => {
-        let event: DashScopeServerEvent
         try {
-          event = JSON.parse(raw.toString()) as DashScopeServerEvent
-        } catch {
-          return
-        }
-        if (event.type === 'session.created') {
-          this.send({
-            type: 'session.update',
-            session: {
-              modalities: ['text', 'audio'],
-              voice: this.config.voice,
-              instructions: this.instructions,
-              input_audio_format: 'pcm',
-              output_audio_format: 'pcm',
-              max_history_turns: this.config.maxHistoryTurns,
-              tools: TOOL_DEFINITIONS,
-              turn_detection: this.config.turnDetection === 'server_vad'
-                ? {
-                    type: 'server_vad',
-                    threshold: 0.5,
-                    silence_duration_ms: this.config.silenceDurationMs,
-                  }
-                : { type: 'smart_turn' },
+          const event = JSON.parse(raw.toString()) as DashScopeServerEvent
+          if (event.type === 'session.created') {
+            this.send({
+              type: 'session.update',
+              session: {
+                modalities: ['text', 'audio'],
+                voice: this.config.voice,
+                instructions: this.instructions,
+                input_audio_format: 'pcm',
+                output_audio_format: 'pcm',
+                max_history_turns: this.config.maxHistoryTurns,
+                tools: TOOL_DEFINITIONS,
+                turn_detection: this.config.turnDetection === 'server_vad'
+                  ? {
+                      type: 'server_vad',
+                      threshold: 0.5,
+                      silence_duration_ms: this.config.silenceDurationMs,
+                    }
+                  : { type: 'smart_turn' },
+              },
+            })
+          }
+          if (event.type === 'session.updated') {
+            clearTimeout(timeout)
+            settled = true
+            resolve()
+          }
+          this.handleEvent(event)
+        } catch (error) {
+          this.emitEvent({
+            type: 'error',
+            error: {
+              type: 'provider_event_error',
+              message: error instanceof Error ? error.message : String(error),
             },
           })
         }
-        if (event.type === 'session.updated') {
-          clearTimeout(timeout)
-          settled = true
-          resolve()
-        }
-        this.handleEvent(event)
       })
       socket.once('close', (code, reason) => {
         clearTimeout(timeout)
-        if (!this.closed) this.callbacks.onEvent({
+        if (!this.closed) this.emitEvent({
           type: 'transport.closed',
           code,
           reason: reason.toString(),
@@ -219,7 +224,7 @@ export class DashScopeRealtime {
   }
 
   private handleEvent(event: DashScopeServerEvent): void {
-    this.callbacks.onEvent(event)
+    this.emitEvent(event)
     if (event.type === 'input_audio_buffer.speech_started') {
       this.inputSpeechActive = true
       return
@@ -241,7 +246,7 @@ export class DashScopeRealtime {
         arguments: stringField(event, 'arguments'),
       }
       const pending = this.pendingTools.get(responseId) ?? []
-      pending.push({ call, result: this.callbacks.onTool(call) })
+      pending.push({ call, result: Promise.resolve().then(() => this.callbacks.onTool(call)) })
       this.pendingTools.set(responseId, pending)
       return
     }
@@ -265,7 +270,7 @@ export class DashScopeRealtime {
     this.responseRequested = true
     void this.finishTools(pending).catch((error: unknown) => {
       this.responseRequested = false
-      if (!this.closed) this.callbacks.onEvent({
+      if (!this.closed) this.emitEvent({
         type: 'error',
         error: {
           type: 'client_tool_error',
@@ -319,6 +324,16 @@ export class DashScopeRealtime {
   private requestResponse(): void {
     this.responseRequested = true
     this.send({ type: 'response.create' })
+  }
+
+  /** A plugin callback must never be able to escape a ws EventEmitter turn and crash DSH. */
+  private emitEvent(event: DashScopeServerEvent): void {
+    try {
+      this.callbacks.onEvent(event)
+    } catch {
+      // The browser-facing connection owns its own failure reporting. Swallow
+      // callback faults here so one voice call cannot terminate the DSH host.
+    }
   }
 
   private send(message: unknown): void {

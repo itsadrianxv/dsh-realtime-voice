@@ -26,6 +26,8 @@ export declare class VoiceCallController implements HostObservable<VoiceSnapshot
     private timer;
     private reconnectTimer;
     private reconnectAttempt;
+    private connectionEpoch;
+    private lastReconnectError;
     private ending;
     getSnapshot: () => VoiceSnapshot;
     subscribe: (listener: () => void) => (() => void);

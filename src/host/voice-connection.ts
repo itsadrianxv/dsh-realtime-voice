@@ -195,7 +195,10 @@ export class VoiceConnection {
           { ptsMs: Math.round(this.outputPtsMs) },
         )
         this.outputPtsMs += audio.byteLength / 2 / OUTPUT_SAMPLE_RATE * 1000
-        this.socket.send(frame, { binary: true })
+        if (this.socket.readyState !== this.socket.OPEN) return
+        this.socket.send(frame, { binary: true }, (error) => {
+          if (error !== undefined && !this.closed) this.dispose('browser-audio-send-failed')
+        })
         this.sendState('speaking')
         return
       }
@@ -214,12 +217,18 @@ export class VoiceConnection {
         return
       }
       case 'transport.closed':
-        this.fail('provider-disconnected', '百炼实时语音连接已断开。', true)
+        this.ctx.logger.warn(`[realtime-voice] DashScope closed: code=${String(event.code)} reason=${String(event.reason ?? '')}`)
+        this.fail(
+          'provider-disconnected',
+          `百炼实时语音连接已断开（代码 ${String(event.code)}${event.reason === '' ? '' : `：${String(event.reason)}`}）。`,
+          true,
+        )
         this.dispose('provider-disconnected')
         return
       case 'error': {
         const error = event.error as Record<string, unknown> | undefined
         const message = typeof error?.message === 'string' ? error.message : '百炼实时语音服务返回错误。'
+        this.ctx.logger.warn(`[realtime-voice] provider error: ${message}`)
         this.fail('provider-error', message, true)
         return
       }

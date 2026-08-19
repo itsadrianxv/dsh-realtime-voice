@@ -114,4 +114,24 @@ describe('DashScope realtime provider', () => {
     expect(socket.sent.filter(message => message.type === 'response.create')).toHaveLength(1)
     provider.close()
   })
+
+  it('contains browser callback faults inside one provider event turn', async () => {
+    const socket = new FakeSocket()
+    const provider = new DashScopeRealtime(
+      config,
+      'secret-not-logged',
+      'voice instructions',
+      {
+        onEvent: () => { throw new Error('browser socket disappeared') },
+        onTool: vi.fn(),
+      },
+      (() => {
+        queueMicrotask(() => socket.event({ type: 'session.created' }))
+        return socket as unknown as WebSocket
+      }),
+    )
+    await provider.connect()
+    expect(() => socket.event({ type: 'response.audio.delta', delta: 'AA==' })).not.toThrow()
+    provider.close()
+  })
 })

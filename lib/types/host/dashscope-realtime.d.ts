@@ -37,5 +37,7 @@ export declare class DashScopeRealtime {
     private finishTools;
     private drainAgentAnnouncements;
     private requestResponse;
+    /** A plugin callback must never be able to escape a ws EventEmitter turn and crash DSH. */
+    private emitEvent;
     private send;
 }
