@@ -61,6 +61,8 @@ export function apply(ctx: ClientContext): void {
       end: () => voice.end(),
       toggleMute: () => voice.toggleMute(),
       cancelResponse: () => voice.cancelResponse(),
+      answerApproval: (approvalId, outcome) => voice.answerApproval(approvalId, outcome),
+      answerQuestion: (requestId, answers) => voice.answerQuestion(requestId, answers),
       openSession: (sessionId) => {
         ctx.sessions.open(sessionId as Parameters<typeof ctx.sessions.open>[0])
       },

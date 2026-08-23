@@ -40,6 +40,33 @@ export interface VoiceHello {
         lastServerSeq: number;
     };
 }
+export interface VoiceApproval {
+    approvalId: string;
+    toolName: string;
+    callId?: string;
+    reason?: string;
+}
+export interface VoiceQuestionOption {
+    label: string;
+    description?: string;
+}
+export interface VoiceQuestionItem {
+    id: string;
+    question: string;
+    detail?: string;
+    header?: string;
+    options?: VoiceQuestionOption[];
+    multiSelect?: boolean;
+}
+export interface VoiceQuestionAnswer {
+    id: string;
+    selected: string[];
+    custom?: string;
+}
+export interface VoiceQuestion {
+    requestId: string;
+    questions: VoiceQuestionItem[];
+}
 export type VoiceClientControl = VoiceHello | {
     type: 'voice.end';
     reason?: string;
@@ -47,6 +74,14 @@ export type VoiceClientControl = VoiceHello | {
     type: 'voice.cancel-response';
 } | {
     type: 'voice.commit';
+} | {
+    type: 'voice.approval-answer';
+    approvalId: string;
+    outcome: 'allowed-once' | 'rejected';
+} | {
+    type: 'voice.question-answer';
+    requestId: string;
+    answers: VoiceQuestionAnswer[];
 } | {
     type: 'voice.ping';
     sentAt: number;
@@ -100,6 +135,20 @@ export type VoiceServerControl = VoiceReady | {
     sessionId: string;
     running: boolean;
     summary?: string;
+} | {
+    type: 'voice.approval';
+    serverSeq: number;
+    sessionId: string;
+    status: 'pending' | 'resolved';
+    approval: VoiceApproval;
+    outcome?: 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable';
+} | {
+    type: 'voice.question';
+    serverSeq: number;
+    sessionId: string;
+    status: 'pending' | 'resolved';
+    question: VoiceQuestion;
+    outcome?: 'answered' | 'cancelled';
 } | {
     type: 'voice.tool';
     serverSeq: number;

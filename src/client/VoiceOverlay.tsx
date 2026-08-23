@@ -2,6 +2,7 @@ import type { HostObservable, InjectFace, PropsRuntime } from '@deepseek-ai/dsh-
 import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import { realtimeVoiceModelLabel, realtimeVoiceTurnDetectionLabel } from '../models.ts'
+import type { VoiceQuestionAnswer } from '../protocol.ts'
 import type { VoiceSnapshot } from './controller.ts'
 import {
   clampFloatingPosition,
@@ -16,6 +17,8 @@ export interface VoiceOverlayInjected {
   end: () => void
   toggleMute: () => void
   cancelResponse: () => void
+  answerApproval: (approvalId: string, outcome: 'allowed-once' | 'rejected') => void
+  answerQuestion: (requestId: string, answers: VoiceQuestionAnswer[]) => void
   openSession: (sessionId: string) => void
 }
 export type VoiceOverlayProps = PropsRuntime<'shell.overlay'> & InjectFace<VoiceOverlayInjected>
@@ -27,7 +30,16 @@ interface DragState {
 }
 
 /** Root-level movable call surface that remains visible while the user changes DSH sessions. */
-export function VoiceOverlay({ useVoice, useSessions, end, toggleMute, cancelResponse, openSession }: VoiceOverlayProps) {
+export function VoiceOverlay({
+  useVoice,
+  useSessions,
+  end,
+  toggleMute,
+  cancelResponse,
+  answerApproval,
+  answerQuestion,
+  openSession,
+}: VoiceOverlayProps) {
   const voice = useVoice(snapshot => snapshot)
   const [collapsed, setCollapsed] = useState(false)
   const [dragging, setDragging] = useState(false)
@@ -35,6 +47,7 @@ export function VoiceOverlay({ useVoice, useSessions, end, toggleMute, cancelRes
   const panelRef = useRef<HTMLElement>(null)
   const dragRef = useRef<DragState>()
   const movedRef = useRef(false)
+  const [questionAnswers, setQuestionAnswers] = useState<Record<string, { selected: string[]; custom: string }>>({})
   const boundSession = useSessions(state => voice.sessionId === undefined
     ? undefined
     : state.byId[voice.sessionId as SessionId])
@@ -44,6 +57,10 @@ export function VoiceOverlay({ useVoice, useSessions, end, toggleMute, cancelRes
   useEffect(() => {
     if (voice.phase === 'requesting-permission') setCollapsed(false)
   }, [voice.phase])
+
+  useEffect(() => {
+    setQuestionAnswers({})
+  }, [voice.pendingQuestion?.requestId])
 
   useEffect(() => {
     const panel = panelRef.current
@@ -216,6 +233,92 @@ export function VoiceOverlay({ useVoice, useSessions, end, toggleMute, cancelRes
           </div>
           {voice.agentSummary === undefined ? null : (
             <div className={styles.agentSummary}><strong>DSH Agent 最新结果</strong>{voice.agentSummary}</div>
+          )}
+          {voice.pendingApproval === undefined ? null : (
+            <section className={styles.interactionCard} aria-label="DSH 操作审批">
+              <strong>需要你的批准</strong>
+              <div className={styles.interactionTitle}>{voice.pendingApproval.toolName}</div>
+              {voice.pendingApproval.reason === undefined ? null : (
+                <p className={styles.interactionDetail}>{voice.pendingApproval.reason}</p>
+              )}
+              <div className={styles.interactionActions}>
+                <button
+                  type="button"
+                  className={styles.rejectButton}
+                  onClick={() => answerApproval(voice.pendingApproval!.approvalId, 'rejected')}
+                >拒绝</button>
+                <button
+                  type="button"
+                  className={styles.allowButton}
+                  onClick={() => answerApproval(voice.pendingApproval!.approvalId, 'allowed-once')}
+                >仅允许这一次</button>
+              </div>
+            </section>
+          )}
+          {voice.pendingQuestion === undefined ? null : (
+            <section className={styles.interactionCard} aria-label="DSH Agent 追问">
+              <strong>Agent 需要你确认</strong>
+              {voice.pendingQuestion.questions.map((question) => {
+                const current = questionAnswers[question.id] ?? { selected: [], custom: '' }
+                return (
+                  <div className={styles.questionBlock} key={question.id}>
+                    <div className={styles.interactionTitle}>{question.header ?? question.question}</div>
+                    {question.header === undefined ? null : <p className={styles.interactionDetail}>{question.question}</p>}
+                    {question.detail === undefined ? null : <p className={styles.interactionDetail}>{question.detail}</p>}
+                    {question.options?.map(option => {
+                      const checked = current.selected.includes(option.label)
+                      return (
+                        <label className={styles.questionOption} key={option.label}>
+                          <input
+                            type={question.multiSelect === true ? 'checkbox' : 'radio'}
+                            name={`${voice.pendingQuestion!.requestId}:${question.id}`}
+                            checked={checked}
+                            onChange={() => setQuestionAnswers(previous => ({
+                              ...previous,
+                              [question.id]: {
+                                ...current,
+                                selected: question.multiSelect === true
+                                  ? checked
+                                    ? current.selected.filter(value => value !== option.label)
+                                    : [...current.selected, option.label]
+                                  : [option.label],
+                              },
+                            }))}
+                          />
+                          <span>{option.label}{option.description === undefined ? '' : ` — ${option.description}`}</span>
+                        </label>
+                      )
+                    })}
+                    <input
+                      className={styles.questionCustom}
+                      value={current.custom}
+                      placeholder={question.options === undefined ? '输入回答' : '其他补充（可选）'}
+                      onChange={event => setQuestionAnswers(previous => ({
+                        ...previous,
+                        [question.id]: { ...current, custom: event.target.value },
+                      }))}
+                    />
+                  </div>
+                )
+              })}
+              <div className={styles.interactionActions}>
+                <button
+                  type="button"
+                  className={styles.allowButton}
+                  onClick={() => {
+                    const answers = voice.pendingQuestion!.questions.map(question => {
+                      const answer = questionAnswers[question.id] ?? { selected: [], custom: '' }
+                      return {
+                        id: question.id,
+                        selected: answer.selected,
+                        ...(answer.custom.trim() === '' ? {} : { custom: answer.custom.trim() }),
+                      }
+                    }).filter(answer => answer.selected.length > 0 || answer.custom !== undefined)
+                    answerQuestion(voice.pendingQuestion!.requestId, answers)
+                  }}
+                >提交回答</button>
+              </div>
+            </section>
           )}
           {voice.error === undefined ? null : <div className={styles.inlineError}>{voice.error}</div>}
           <footer className={styles.controls}>

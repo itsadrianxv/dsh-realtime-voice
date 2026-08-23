@@ -1,5 +1,5 @@
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots';
-import { type VoicePhase } from '../protocol.ts';
+import { type VoiceApproval, type VoicePhase, type VoiceQuestion, type VoiceQuestionAnswer } from '../protocol.ts';
 export type ClientVoicePhase = 'idle' | 'requesting-permission' | VoicePhase | 'error';
 export interface VoiceSnapshot {
     phase: ClientVoicePhase;
@@ -10,6 +10,8 @@ export interface VoiceSnapshot {
     assistantTranscript: string;
     agentRunning: boolean;
     agentSummary?: string;
+    pendingApproval?: VoiceApproval;
+    pendingQuestion?: VoiceQuestion;
     providerModel?: string;
     turnDetection?: 'server_vad' | 'smart_turn';
     elapsedSeconds: number;
@@ -37,6 +39,8 @@ export declare class VoiceCallController implements HostObservable<VoiceSnapshot
     end(): Promise<void>;
     toggleMute(): void;
     cancelResponse(): void;
+    answerApproval(approvalId: string, outcome: 'allowed-once' | 'rejected'): void;
+    answerQuestion(requestId: string, answers: VoiceQuestionAnswer[]): void;
     dispose(): Promise<void>;
     private connect;
     private receive;

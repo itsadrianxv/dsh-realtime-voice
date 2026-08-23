@@ -8,7 +8,10 @@ import {
   OUTPUT_SAMPLE_RATE,
   VOICE_PROTOCOL,
   VOICE_ROUTE,
+  type VoiceApproval,
   type VoicePhase,
+  type VoiceQuestion,
+  type VoiceQuestionAnswer,
   type VoiceServerControl,
 } from '../protocol.ts'
 import { BrowserAudioEngine } from './audio-engine.ts'
@@ -24,6 +27,8 @@ export interface VoiceSnapshot {
   assistantTranscript: string
   agentRunning: boolean
   agentSummary?: string
+  pendingApproval?: VoiceApproval
+  pendingQuestion?: VoiceQuestion
   providerModel?: string
   turnDetection?: 'server_vad' | 'smart_turn'
   elapsedSeconds: number
@@ -111,6 +116,16 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
   cancelResponse(): void {
     this.audio?.interruptPlayback()
     this.sendControl({ type: 'voice.cancel-response' })
+  }
+
+  answerApproval(approvalId: string, outcome: 'allowed-once' | 'rejected'): void {
+    if (this.snapshot.pendingApproval?.approvalId !== approvalId) return
+    this.sendControl({ type: 'voice.approval-answer', approvalId, outcome })
+  }
+
+  answerQuestion(requestId: string, answers: VoiceQuestionAnswer[]): void {
+    if (this.snapshot.pendingQuestion?.requestId !== requestId || answers.length === 0) return
+    this.sendControl({ type: 'voice.question-answer', requestId, answers })
   }
 
   async dispose(): Promise<void> {
@@ -277,6 +292,22 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
           agentRunning: message.running,
           ...(message.summary === undefined ? {} : { agentSummary: message.summary }),
         })
+        return
+      case 'voice.approval':
+        if (message.status === 'pending') {
+          this.update({ ...this.snapshot, pendingApproval: message.approval })
+        } else {
+          const { pendingApproval: _pendingApproval, ...withoutApproval } = this.snapshot
+          this.update(withoutApproval)
+        }
+        return
+      case 'voice.question':
+        if (message.status === 'pending') {
+          this.update({ ...this.snapshot, pendingQuestion: message.question })
+        } else {
+          const { pendingQuestion: _pendingQuestion, ...withoutQuestion } = this.snapshot
+          this.update(withoutQuestion)
+        }
         return
       case 'voice.error':
         if (message.recoverable) {

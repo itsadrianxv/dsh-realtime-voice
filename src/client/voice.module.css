@@ -318,6 +318,82 @@
   overflow-y: auto;
 }
 
+.interactionCard {
+  display: grid;
+  gap: 8px;
+  max-height: 230px;
+  margin-bottom: 12px;
+  padding: 11px 12px;
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-status-warning, #f2a20c) 55%, var(--dsw-alias-border-subtle));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--dsw-alias-status-warning, #f2a20c) 8%, var(--dsw-alias-surface-primary));
+  font-size: 12px;
+  overflow-y: auto;
+}
+
+.interactionTitle {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.interactionDetail {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary, var(--dsw-alias-text-secondary));
+  line-height: 1.45;
+}
+
+.interactionActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.allowButton,
+.rejectButton {
+  padding: 6px 11px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.allowButton {
+  color: #fff;
+  background: var(--dsw-alias-button-info-fill, #3964fe);
+}
+
+.rejectButton {
+  color: var(--dsw-alias-text-primary);
+  border-color: var(--dsw-alias-border-subtle);
+  background: var(--dsw-alias-surface-primary);
+}
+
+.questionBlock {
+  display: grid;
+  gap: 6px;
+  padding-top: 7px;
+  border-top: 1px solid var(--dsw-alias-border-subtle);
+}
+
+.questionOption {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.questionCustom {
+  min-width: 0;
+  height: 32px;
+  padding: 0 9px;
+  border: 1px solid var(--dsw-alias-border-subtle);
+  border-radius: 8px;
+  color: var(--dsw-alias-text-primary);
+  background: var(--dsw-alias-surface-primary);
+  font: inherit;
+}
+
 .controls {
   margin-top: auto;
   padding-top: 12px;

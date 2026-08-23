@@ -1,48 +1,89 @@
 import type { Context } from '@deepseek-ai/cordis';
-interface SessionState {
+export interface HandoffRecord {
+    handoffId: string;
     sessionId: string;
-    running: boolean;
-    cwd?: string;
-    title?: string;
+    mode: 'queue' | 'steer';
+    request: string;
+    spokenInput: string;
+    status: 'accepted' | 'running' | 'needs-input' | 'completed' | 'cancelled' | 'failed';
+    turn?: number;
+    createdAt: number;
 }
-interface WorkerState extends SessionState {
-    instruction: string;
+export interface PendingVoiceApproval {
+    rpcId: string;
+    approvalId: string;
+    sessionId: string;
+    toolName: string;
+    callId?: string;
+    reason?: string;
 }
-export interface VoiceCoordinatorCallbacks {
-    onWorkerStarted?: (worker: Readonly<WorkerState>) => void;
-    onWorkerUpdated?: (worker: Readonly<WorkerState>) => void;
+export interface VoiceQuestionOption {
+    label: string;
+    description?: string;
 }
-export declare const VOICE_COORDINATOR_PROMPT = "## Realtime voice coordinator\n\nThis DSH session is currently the reasoning coordinator for a live voice call. Preserve the session's original instructions, permissions, memory, project context, and ongoing work. The speech provider is only the ears and voice; you are the Agent that decides, answers, and acts.\n\nKeep spoken answers concise and natural. Choose one of three modes:\n\n1. Converse here for discussion, clarification, prioritization, and ordinary questions.\n2. Do a quick check here when it is short and immediately helps the live conversation.\n3. Delegate blocking mechanics with voice_delegate_task when work is slow, multi-step, or can proceed independently, especially file or app operations, printing, browsing, implementation, deep investigation, log collection, deployment, and device or external-service actions. Keep this coordinator responsive while the worker runs.\n\nFor follow-up instructions to a delegated worker, use voice_message_task. Use voice_task_status to inspect it and voice_cancel_task only when the user clearly asks to stop that worker. Worker results will be returned to this coordinator automatically.\n\nNever claim that you cannot access the computer, files, apps, or devices before the appropriate worker has inspected the available DSH tools and permissions. Preserve every concrete constraint in the delegated instruction. For example, a request to find a WeChat document and print it in color, double-sided is blocking mechanics and must be delegated in full, not replaced with manual steps.";
+export interface VoiceQuestionItem {
+    id: string;
+    question: string;
+    detail?: string;
+    header?: string;
+    options?: VoiceQuestionOption[];
+    multiSelect?: boolean;
+}
+export interface PendingVoiceQuestion {
+    rpcId: string;
+    sessionId: string;
+    questions: VoiceQuestionItem[];
+}
+export interface VoiceQuestionAnswer {
+    id: string;
+    selected: string[];
+    custom?: string;
+}
+export interface DshVoiceCoordinatorState {
+    handoffs: Map<string, HandoffRecord>;
+    pendingApprovals: Map<string, PendingVoiceApproval>;
+    pendingQuestions: Map<string, PendingVoiceQuestion>;
+}
+export declare function createDshVoiceCoordinatorState(): DshVoiceCoordinatorState;
 /**
- * Scoped DSH-side coordinator attached only to the Agent session owning one
- * voice call. DSH makes every semantic decision; the audio model gets no tools.
+ * The DSH execution plane for one live call. Qwen owns the realtime
+ * conversation and invokes this coordinator only for semantic handoffs,
+ * corrections, cancellation, approvals, and structured user questions.
  */
 export declare class DshVoiceCoordinator {
     private readonly ctx;
     private readonly sessionId;
-    private readonly callbacks;
-    private readonly workers;
-    private readonly disposers;
-    private attached;
-    constructor(ctx: Context, sessionId: string, callbacks?: VoiceCoordinatorCallbacks);
-    attach(): Promise<void>;
-    dispose(): void;
-    /** Every completed spoken turn enters the authoritative bound DSH session. */
-    submitUserTurn(transcript: string): Promise<void>;
-    isWorkerSession(sessionId: string): boolean;
-    /** Return one completed worker turn to the coordinator as durable context. */
-    returnWorkerResult(workerSessionId: string, text: string): Promise<void>;
-    private delegateTool;
-    private messageTool;
-    private statusTool;
-    private cancelTool;
-    private delegate;
-    private messageWorker;
-    private workerStatus;
-    private cancelWorker;
-    private requireWorker;
+    private readonly handoffs;
+    private readonly pendingApprovals;
+    private readonly pendingQuestions;
+    constructor(ctx: Context, sessionId: string, state?: DshVoiceCoordinatorState);
+    /** Start work when idle, or steer the active turn when DSH is already busy. */
+    handoff(request: string, spokenInput: string): Promise<HandoffRecord>;
+    /** Cancel the authoritative bound DSH turn; there is no shadow worker. */
+    cancel(reason?: string): Promise<{
+        sessionId: string;
+        status: 'cancelled';
+    }>;
+    markTurnStarted(turn: number): void;
+    markNeedsInput(): void;
+    markTurnEnded(turn: number, reason: string): void;
+    rememberApproval(approval: PendingVoiceApproval): void;
+    forgetApproval(approvalId: string): void;
+    listPendingApprovals(): PendingVoiceApproval[];
+    resolveApproval(approvalId: string, outcome: 'allowed-once' | 'rejected'): Promise<{
+        approvalId: string;
+        outcome: 'allowed-once' | 'rejected';
+        accepted: true;
+    }>;
+    rememberQuestion(question: PendingVoiceQuestion): void;
+    forgetQuestion(rpcId: string): void;
+    listPendingQuestions(): PendingVoiceQuestion[];
+    answerQuestion(rpcId: string, answers: VoiceQuestionAnswer[]): Promise<{
+        rpcId: string;
+        accepted: true;
+    }>;
+    get active(): boolean;
+    private activeHandoffs;
     private sessionState;
-    private lastAssistantText;
     private rpcId;
 }
-export {};

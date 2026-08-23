@@ -13,6 +13,7 @@ import { WebSocketServer } from 'ws'
 import { VOICE_ROUTE } from './protocol.ts'
 import { Config, type VoiceConfig } from './host/config.ts'
 import { VoiceConnection } from './host/voice-connection.ts'
+import { VoiceRuntime } from './host/voice-runtime.ts'
 import { REALTIME_VOICE_SETTINGS_NAMESPACE } from './models.ts'
 
 export { Config }
@@ -25,6 +26,7 @@ export const inject = ['webServer', 'apiProxy', 'credentials', 'agents', 'system
 export function apply(ctx: Context, config: VoiceConfig): void {
   const server = new WebSocketServer({ noServer: true })
   const connections = new Set<VoiceConnection>()
+  const voiceRuntime = new VoiceRuntime()
   let readConfig = (): VoiceConfig => config
 
   // Settings are optional at the Cordis boundary. When the Web profile serves
@@ -55,7 +57,7 @@ export function apply(ctx: Context, config: VoiceConfig): void {
     }
     server.handleUpgrade(request, socket, head, (websocket) => {
       let connection: VoiceConnection
-      connection = new VoiceConnection(ctx, websocket, request, activeConfig, () => connections.delete(connection))
+      connection = new VoiceConnection(ctx, websocket, request, activeConfig, () => connections.delete(connection), voiceRuntime)
       connections.add(connection)
     })
   }
@@ -66,6 +68,7 @@ export function apply(ctx: Context, config: VoiceConfig): void {
       unregister()
       for (const connection of [...connections]) connection.dispose()
       connections.clear()
+      voiceRuntime.clear()
       await new Promise<void>((resolve) => server.close(() => resolve()))
     }
   }, 'realtime-voice: route and active call lifecycle')

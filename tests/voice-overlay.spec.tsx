@@ -16,6 +16,7 @@ describe('floating voice overlay', () => {
       providerModel: 'qwen-audio-3.0-realtime-plus',
       turnDetection: 'server_vad',
       elapsedSeconds: 65,
+      pendingApproval: { approvalId: 'approval-one', toolName: 'exec_command', reason: '需要访问打印机' },
     }
     const html = renderToStaticMarkup(<VoiceOverlay {...({
       useVoice: (selector: (value: VoiceSnapshot) => unknown) => selector(voice),
@@ -33,6 +34,8 @@ describe('floating voice overlay', () => {
     expect(html).toContain('绑定任务')
     expect(html).toContain('快速声学打断')
     expect(html).toContain('立即打断')
+    expect(html).toContain('需要你的批准')
+    expect(html).toContain('仅允许这一次')
     expect(html).toContain('01:05')
   })
 })

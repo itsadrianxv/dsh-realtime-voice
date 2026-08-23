@@ -2,7 +2,7 @@
 
 DeepSeek Harness 官方插件形态的实时语音 Agent：安装后在 WebUI 输入框旁出现拨打按钮，用户可持续对话、打断播报、询问进度，并用语音启动、追加、纠正或停止当前 DSH Agent 工作。
 
-当前版本：`0.1.0-alpha.7`，目标 DSH：`0.1.0-rc.7`。
+当前版本：`0.1.0-alpha.8`，目标 DSH：`0.1.0-rc.7`。
 
 本包同时声明 DSH bundle、Host 插件和“原生 WebUI 浏览器侧”插件。这里不是另做一个网站：UI 直接注入 DSH 自带的 `http://127.0.0.1:3080`，不新增页面或 UI 端口。它不修改 DSH 源码，不另起后台进程；卸载或禁用时会移除 UI/路由并关闭麦克风、音频、浏览器 WebSocket 和百炼连接，已经交给 DSH 的任务继续运行。
 
@@ -14,22 +14,21 @@ DeepSeek Harness 官方插件形态的实时语音 Agent：安装后在 WebUI �
 - “快速声学打断 / 智能语义轮次”可切换；快速模式采用浏览器本地起音检测、立即停播、Host 显式取消和百炼 VAD 三层打断
 - 自动识别 `DASHSCOPE_API_KEY`，也可在插件设置中通过 DSH 官方 credentials 安全写入或替换；浏览器不可回读明文
 - 默认低延迟 `server_vad`（阈值 0.35、静音 500ms），可选 `smart_turn`；实时转写、流式 PCM 播放、用户全双工打断
-- Agent-first 语义路由：每条最终语音转写都直接进入拨号时绑定的 DSH Agent，由 Agent 自己理解、回答、调用现有工具或委派后台任务；不做关键词或正则分流
-- 当前会话动态注入语音协调提示与 4 个仅该 Agent 可见的 DSH 工具：委派、追加/纠正、状态、取消
-- 耗时、多步或阻塞工作可委派到同工作区、同模型的真实 DSH 工作会话，语音协调 Agent 保持可响应，工作结果完成后自动回到原会话并播报
-- 按工作区/标题检索其他 DSH 会话，并读取指定会话最后一条 Agent 回复
-- 双层上下文闭环：工作指令进入持久 DSH 会话，`turn/end` 的最终 Agent 回复回灌语音上下文并主动播报
-- 长通话恢复：隔离上游/浏览器 socket 异常、忽略迟到旧连接事件、重置音频流，并针对百炼 `1007` 限流延长退避
+- 实时优先的语义交接：Qwen Audio Realtime 立即处理自然对话；只有文件、应用、设备、项目、联网、打印等真实工作才通过官方 Function Calling 交给 DSH，不靠关键词或正则脚本触发
+- DSH 是唯一执行面：任务直接进入拨号时绑定的原会话；空闲时 `queue`，工作中补充或纠正自动 `steer`，不创建影子语音 Agent 或后台 worker
+- 进度与终态闭环：DSH 的阶段消息、`turn/end` 结果、错误和取消状态回灌实时会话；只有权威终态才会被播报为“已完成”
+- 审批与追问闭环：订阅 DSH 原生 `approval/requested`、`question/requested`，用户可直接口头回答，也可在悬浮窗审批卡/选项卡确认，结果通过原始 RPC 回到同一任务
+- 长通话恢复：隔离上游/浏览器 socket 异常、忽略迟到旧连接事件、重置音频流，并针对百炼 `1007` 限流延长退避；十分钟内重连会恢复同一 voiceSessionId、最近对话边缘状态和待处理审批/追问
 - DSH credentials 解析 `DASHSCOPE_API_KEY`，密钥不进入浏览器包
 - `dsh.voice.v1` 二进制协议，WebUI 与微信小程序共用底层契约
 
-运行时为两层模型：Qwen Audio Realtime 只负责转写、播报和打断，不持有 DSH 工具也不决定是否执行；DSH 当前会话选择的 DeepSeek/千问等 Agent 模型负责全部语义、工具与工作编排。这是单一事实源：语音中的问答和执行都由绑定的 DSH Agent 产生。
+运行时为双平面：Qwen Audio Realtime 是低延迟会话面，负责听、说、自然问答、VAD 打断和判断是否需要真实执行；DSH 当前会话选择的 DeepSeek/千问等 Agent 模型是执行面，负责工具、项目上下文和持续 Agent 工作。两者通过 4 个窄语义 Function Call（交接、取消、审批、追问回答）及 DSH 权威事件合成一个助手体验。
 
 ## 上下文模型
 
-实时语音不再建第二个“语义对话大脑”。DSH 会话是唯一长期事实源：插件通过官方 `session.prompt` 把每条最终转写原样写入拨号时绑定的 DSH 会话，再订阅该会话事件，以 `sessionId + turn + eventSeq` 关联并去重，在 `turn/end` 后把最终 `assistant/message` 交给 Qwen 仅作语音播报。语音链路中 Qwen 的短期状态只服务声学连续性、字幕和打断，不承担 Agent 记忆。
+实时语音保留一份通话所需的短期上下文，DSH 会话保留项目与执行的长期上下文。普通聊天不会污染 DSH 任务记录；一旦用户要求真实工作，Qwen 通过 `handoff_to_dsh_agent` 把完整意图写入拨号时绑定的 DSH 会话。插件订阅同一会话的进度、审批、追问和终态，再以带类型的 `[BACKEND]` 事件注入 Qwen，使通话继续保持低延迟，而执行结果始终以 DSH 为准。
 
-一通电话与拨号瞬间的 DSH `sessionId` 一对一绑定，而且全局同时只允许一通。页面切换不会迁移通话，右侧栏始终显示绑定线程并可返回。DSH 的“新建会话”页面在选定工作区后已经持有一个空白 session：从这里拨号会绑定这个空白线程，第一条有效语音转写（包括寒暄或任务）成为该 DSH 会话的第一轮，因此文字与语音上下文始终一致。尚未选工作区、因此尚无 session 时，插件不会猜目录或偷偷创建无归属会话，选择工作区后拨号入口自动出现。
+一通电话与拨号瞬间的 DSH `sessionId` 一对一绑定，而且全局同时只允许一通。页面切换不会迁移通话，悬浮窗始终显示绑定线程并可返回。DSH 的“新建会话”页面在选定工作区后已经持有一个空白 session：从这里拨号会先进行自然通话，第一项需要真实执行的要求才成为该 DSH 会话的第一轮。尚未选工作区、因此尚无 session 时，插件不会猜目录或偷偷创建无归属会话，选择工作区后拨号入口自动出现。
 
 ## 本地开发安装
 
@@ -52,7 +51,7 @@ dsh plugin --profile web add .
 首个可用版验证完成并发布 GitHub tag 后：
 
 ```powershell
-dsh plugin --profile web add github:martinbear1/dsh-realtime-voice#v0.1.0-alpha.7
+dsh plugin --profile web add github:martinbear1/dsh-realtime-voice#v0.1.0-alpha.8
 ```
 
 发布包会提交预构建 `lib/`，不使用会触发 pnpm `allowBuilds` 的 `prepare`，以保持一条命令安装。
@@ -77,11 +76,11 @@ dsh plugin --profile web remove @harness-remote/dsh-realtime-voice
 - 真实 WebUI 布局测量：拨号按钮与发送按钮均为 34px 蓝色圆形，拨号按钮位于发送按钮右侧
 - 现有 Agent 会话与所选工作区空白新会话均出现拨号入口；无工作区时不创建隐式任务会话
 - `qwen-audio-3.0-realtime-plus` 真实建连、`voice.ready` 和 ping/pong
-- Agent-first 合成语音完整回环：16 kHz PCM 上行、英文转写原样进入持久 DSH 会话、DSH Agent 生成最终回复、Qwen 播报及 24 kHz PCM 下行
+- Qwen Function Calling → 绑定 DSH 会话 `queue/steer` → DSH 权威事件 → Qwen 主动播报的语义执行回环
 - 真实 `ws` 成功回调兼容：首个下行音频包不会被误判为发送失败；助手流式字幕按增量完整拼接
 - 本地起音约 80ms 后先清空播放，Host 对同一响应只取消一次；VAD 云端事件继续作为权威兜底
 - 悬浮窗口拖拽坐标自动限制在视口内，窗口缩放与展开/收起时不会丢出屏幕
 - 插件增删前后 28 个现有会话及最新会话 ID 保持一致
-- 协议、DSH Agent 会话绑定、会话级工具注入、后台工作会话与 Host 生命周期自动化测试
+- 协议、DSH 会话绑定、语义 Function Calling、审批/追问响应、断线续接与 Host 生命周期自动化测试
 
 真实麦克风环境音与听感仍需人工验收；自动测试不会擅自采集或上传环境音。

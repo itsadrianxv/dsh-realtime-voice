@@ -29,7 +29,16 @@ All multi-byte header integers are big-endian. One WebSocket binary message cont
 
 ## Session semantics
 
-The first client frame is `voice.hello`. It pins the call to one DSH Session id; changing the visible WebUI or Mini Program page never retargets an active call. A disconnected voice socket never cancels the DSH Agent. Reconnect creates a new upstream speech session and reconstructs short context from the authoritative DSH session.
+The first client frame is `voice.hello`. It pins the call to one DSH Session id; changing the visible WebUI or Mini Program page never retargets an active call. A disconnected voice socket never cancels the DSH Agent. `voice.hello.resume` may recover the same short-lived call ledger and pending interaction cards; DSH remains the durable task source of truth.
+
+Qwen Audio Realtime is the conversational plane. It answers ordinary conversation itself and invokes a deliberately narrow Function Calling vocabulary only when real execution is required. `handoff_to_dsh_agent` queues work when the pinned DSH session is idle and steers the same turn when it is running. DSH progress and terminal events are tagged and injected back into the Realtime conversation; an accepted handoff is never represented as completed work.
+
+DSH approval and structured-question events are first-class protocol messages:
+
+- Host → client: `voice.approval`, `voice.question`
+- Client → Host: `voice.approval-answer`, `voice.question-answer`
+
+The Host answers the original DSH mux `rpcId`; it does not translate the user's choice into a new Agent prompt. A Mini Program can render the same cards as WebUI, while a voice-only client may let Qwen collect the answer and invoke the corresponding semantic function.
 
 ## Mini Program boundary
 

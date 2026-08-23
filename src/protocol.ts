@@ -53,10 +53,44 @@ export interface VoiceHello {
   }
 }
 
+export interface VoiceApproval {
+  approvalId: string
+  toolName: string
+  callId?: string
+  reason?: string
+}
+
+export interface VoiceQuestionOption {
+  label: string
+  description?: string
+}
+
+export interface VoiceQuestionItem {
+  id: string
+  question: string
+  detail?: string
+  header?: string
+  options?: VoiceQuestionOption[]
+  multiSelect?: boolean
+}
+
+export interface VoiceQuestionAnswer {
+  id: string
+  selected: string[]
+  custom?: string
+}
+
+export interface VoiceQuestion {
+  requestId: string
+  questions: VoiceQuestionItem[]
+}
+
 export type VoiceClientControl = VoiceHello
   | { type: 'voice.end'; reason?: string }
   | { type: 'voice.cancel-response' }
   | { type: 'voice.commit' }
+  | { type: 'voice.approval-answer'; approvalId: string; outcome: 'allowed-once' | 'rejected' }
+  | { type: 'voice.question-answer'; requestId: string; answers: VoiceQuestionAnswer[] }
   | { type: 'voice.ping'; sentAt: number }
 
 export interface VoiceReady {
@@ -91,6 +125,22 @@ export type VoiceServerControl = VoiceReady
   }
   | { type: 'voice.playback-clear'; serverSeq: number; streamId: number; reason: 'barge-in' | 'cancelled' }
   | { type: 'voice.agent-status'; serverSeq: number; sessionId: string; running: boolean; summary?: string }
+  | {
+    type: 'voice.approval'
+    serverSeq: number
+    sessionId: string
+    status: 'pending' | 'resolved'
+    approval: VoiceApproval
+    outcome?: 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
+  }
+  | {
+    type: 'voice.question'
+    serverSeq: number
+    sessionId: string
+    status: 'pending' | 'resolved'
+    question: VoiceQuestion
+    outcome?: 'answered' | 'cancelled'
+  }
   | {
     type: 'voice.tool'
     serverSeq: number
@@ -192,11 +242,27 @@ export function isVoiceClientControl(value: unknown): value is VoiceClientContro
   const message = value as Record<string, unknown>
   if (message.type === 'voice.end') return message.reason === undefined || (typeof message.reason === 'string' && message.reason.length <= 128)
   if (message.type === 'voice.cancel-response' || message.type === 'voice.commit') return true
+  if (message.type === 'voice.approval-answer') {
+    return typeof message.approvalId === 'string'
+      && message.approvalId.length > 0
+      && message.approvalId.length <= 256
+      && (message.outcome === 'allowed-once' || message.outcome === 'rejected')
+  }
+  if (message.type === 'voice.question-answer') {
+    return typeof message.requestId === 'string'
+      && message.requestId.length > 0
+      && message.requestId.length <= 256
+      && Array.isArray(message.answers)
+      && message.answers.length > 0
+      && message.answers.length <= 3
+      && message.answers.every(isQuestionAnswer)
+  }
   if (message.type === 'voice.ping') return typeof message.sentAt === 'number' && Number.isFinite(message.sentAt)
   if (message.type !== 'voice.hello') return false
   const client = message.client as Record<string, unknown> | undefined
   const target = message.target as Record<string, unknown> | undefined
   const audio = message.audio as Record<string, unknown> | undefined
+  const resume = message.resume as Record<string, unknown> | undefined
   return message.protocol === VOICE_PROTOCOL
     && typeof message.requestId === 'string'
     && message.requestId.length > 0
@@ -214,6 +280,28 @@ export function isVoiceClientControl(value: unknown): value is VoiceClientContro
     && target.sessionId.length <= 256
     && isPcmSpec(audio?.input)
     && isPcmSpec(audio?.output)
+    && (resume === undefined || (
+      typeof resume === 'object'
+      && resume !== null
+      && typeof resume.voiceSessionId === 'string'
+      && resume.voiceSessionId.length > 0
+      && resume.voiceSessionId.length <= 256
+      && typeof resume.lastServerSeq === 'number'
+      && Number.isSafeInteger(resume.lastServerSeq)
+      && resume.lastServerSeq >= 0
+    ))
+}
+
+function isQuestionAnswer(value: unknown): value is VoiceQuestionAnswer {
+  if (typeof value !== 'object' || value === null) return false
+  const answer = value as Record<string, unknown>
+  return typeof answer.id === 'string'
+    && answer.id.length > 0
+    && answer.id.length <= 128
+    && Array.isArray(answer.selected)
+    && answer.selected.length <= 16
+    && answer.selected.every(item => typeof item === 'string' && item.length <= 256)
+    && (answer.custom === undefined || (typeof answer.custom === 'string' && answer.custom.length <= 4_000))
 }
 
 function isClientPlatform(value: unknown): value is VoiceClientPlatform {

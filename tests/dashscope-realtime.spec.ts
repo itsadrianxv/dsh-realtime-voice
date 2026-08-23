@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events'
 import WebSocket from 'ws'
 import { describe, expect, it, vi } from 'vitest'
 import { Config, type VoiceConfig } from '../src/host/config.ts'
-import { DashScopeRealtime } from '../src/host/dashscope-realtime.ts'
+import { DashScopeRealtime, type RealtimeFunctionTool } from '../src/host/dashscope-realtime.ts'
 
 const config: VoiceConfig = {
   endpoint: 'wss://example.invalid/api-ws/v1/realtime',
@@ -17,6 +17,15 @@ const config: VoiceConfig = {
   maxBinaryFrameBytes: 64 * 1024,
   connectTimeoutMs: 1_000,
 }
+
+const tools: readonly RealtimeFunctionTool[] = [{
+  type: 'function',
+  function: {
+    name: 'handoff_to_dsh_agent',
+    description: 'Execute real work.',
+    parameters: { type: 'object', required: ['instruction'], properties: { instruction: { type: 'string' } } },
+  },
+}]
 
 class FakeSocket extends EventEmitter {
   readyState = WebSocket.OPEN
@@ -38,69 +47,90 @@ class FakeSocket extends EventEmitter {
   }
 }
 
-describe('DashScope realtime provider', () => {
-  it('configures the fast VAD profile with the requested acoustic thresholds', async () => {
-    const socket = new FakeSocket()
-    const provider = new DashScopeRealtime(
-      new Config({}),
-      'secret-not-logged',
-      'voice instructions',
-      { onEvent: vi.fn() },
-      (() => {
-        queueMicrotask(() => socket.event({ type: 'session.created' }))
-        return socket as unknown as WebSocket
-      }),
-    )
+function createProvider(
+  socket: FakeSocket,
+  selectedConfig: VoiceConfig = config,
+  onEvent = vi.fn(),
+): DashScopeRealtime {
+  return new DashScopeRealtime(
+    selectedConfig,
+    'secret-not-logged',
+    'voice instructions',
+    tools,
+    { onEvent },
+    ((url, options) => {
+      expect(options.headers?.Authorization).toBe('Bearer secret-not-logged')
+      expect(url.searchParams.get('model')).toBe(selectedConfig.model)
+      queueMicrotask(() => socket.event({ type: 'session.created' }))
+      return socket as unknown as WebSocket
+    }),
+  )
+}
 
+describe('DashScope realtime provider', () => {
+  it('configures the fast VAD profile and semantic Function Calling tools', async () => {
+    const socket = new FakeSocket()
+    const selected = new Config({})
+    const provider = createProvider(socket, selected)
     await provider.connect()
+
     const update = socket.sent.find(message => message.type === 'session.update')
-    expect((update?.session as Record<string, unknown>).turn_detection).toEqual({
+    const session = update?.session as Record<string, unknown>
+    expect(session.turn_detection).toEqual({
       type: 'server_vad',
       threshold: 0.35,
       silence_duration_ms: 500,
     })
+    expect(session.tools).toEqual(tools)
     provider.close()
   })
 
-  it('configures the quality model as a speech-only session without provider tools', async () => {
+  it('configures the quality model with smart turn detection', async () => {
     const socket = new FakeSocket()
-    const provider = new DashScopeRealtime(
-      config,
-      'secret-not-logged',
-      'voice instructions',
-      { onEvent: vi.fn() },
-      ((url, options) => {
-        expect(url.searchParams.get('model')).toBe('qwen-audio-3.0-realtime-plus')
-        expect(options.headers?.Authorization).toBe('Bearer secret-not-logged')
-        queueMicrotask(() => socket.event({ type: 'session.created' }))
-        return socket as unknown as WebSocket
-      }),
-    )
-
+    const provider = createProvider(socket)
     await provider.connect()
+
     const update = socket.sent.find(message => message.type === 'session.update')
-    expect(update).toBeDefined()
-    expect((update?.session as Record<string, unknown>).tools).toBeUndefined()
-    expect(JSON.stringify(update)).not.toContain('function')
+    expect(update).toMatchObject({
+      session: {
+        modalities: ['text', 'audio'],
+        voice: 'longanqian',
+        turn_detection: { type: 'smart_turn' },
+        tools,
+      },
+    })
     provider.close()
   })
 
-  it('queues a durable Agent result while speaking and announces it exactly once after the response', async () => {
+  it('returns Function Call output immediately and waits for the active response before continuing', async () => {
     const socket = new FakeSocket()
-    const provider = new DashScopeRealtime(
-      config,
-      'secret-not-logged',
-      'voice instructions',
-      { onEvent: vi.fn() },
-      (() => {
-        queueMicrotask(() => socket.event({ type: 'session.created' }))
-        return socket as unknown as WebSocket
-      }),
-    )
+    const provider = createProvider(socket)
     await provider.connect()
     socket.event({ type: 'response.created', response: { id: 'voice-response' } })
-    provider.announceAgentResult('Agent finished successfully', 42)
-    provider.announceAgentResult('Agent finished successfully', 42)
+
+    provider.completeFunctionCall('call-1', { status: 'accepted', handoff_id: 'handoff-1' })
+    expect(socket.sent.filter(message => message.type === 'conversation.item.create')).toContainEqual({
+      type: 'conversation.item.create',
+      item: {
+        type: 'function_call_output',
+        call_id: 'call-1',
+        output: JSON.stringify({ status: 'accepted', handoff_id: 'handoff-1' }),
+      },
+    })
+    expect(socket.sent.filter(message => message.type === 'response.create')).toHaveLength(0)
+
+    socket.event({ type: 'response.done', response: { id: 'voice-response' } })
+    expect(socket.sent.filter(message => message.type === 'response.create')).toHaveLength(1)
+    provider.close()
+  })
+
+  it('queues and deduplicates authoritative DSH updates until Qwen is idle', async () => {
+    const socket = new FakeSocket()
+    const provider = createProvider(socket)
+    await provider.connect()
+    socket.event({ type: 'response.created', response: { id: 'voice-response' } })
+    provider.announceBackendEvent('dsh-event-42', '[COMPLETE] 打印完成。')
+    provider.announceBackendEvent('dsh-event-42', '[COMPLETE] 打印完成。')
     expect(socket.sent.filter(message => message.type === 'conversation.item.create')).toHaveLength(0)
 
     socket.event({ type: 'response.done', response: { id: 'voice-response' } })
@@ -108,30 +138,18 @@ describe('DashScope realtime provider', () => {
     expect(items).toHaveLength(1)
     expect(items[0]).toMatchObject({
       item: {
-        id: 'dsh_agent_42',
+        id: 'dsh-event-42',
         type: 'message',
-        role: 'system',
-        content: [{ type: 'input_text' }],
+        role: 'user',
+        content: [{ type: 'input_text', text: expect.stringContaining('[BACKEND]') }],
       },
     })
-    expect(socket.sent.filter(message => message.type === 'response.create')).toHaveLength(1)
     provider.close()
   })
 
   it('contains browser callback faults inside one provider event turn', async () => {
     const socket = new FakeSocket()
-    const provider = new DashScopeRealtime(
-      config,
-      'secret-not-logged',
-      'voice instructions',
-      {
-        onEvent: () => { throw new Error('browser socket disappeared') },
-      },
-      (() => {
-        queueMicrotask(() => socket.event({ type: 'session.created' }))
-        return socket as unknown as WebSocket
-      }),
-    )
+    const provider = createProvider(socket, config, () => { throw new Error('browser socket disappeared') })
     await provider.connect()
     expect(() => socket.event({ type: 'response.audio.delta', delta: 'AA==' })).not.toThrow()
     provider.close()

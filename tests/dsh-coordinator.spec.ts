@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
-import { DshVoiceCoordinator, VOICE_COORDINATOR_PROMPT } from '../src/host/dsh-coordinator.ts'
+import {
+  createDshVoiceCoordinatorState,
+  DshVoiceCoordinator,
+  type PendingVoiceApproval,
+  type PendingVoiceQuestion,
+} from '../src/host/dsh-coordinator.ts'
 
 const sessionId = 'session-voice-parent'
 
@@ -19,118 +23,99 @@ function createContext(running = false) {
       projections: { values: { title: 'Bound task' } },
     }],
   }))
-  const models = vi.fn(async () => ok({
-    current: { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'medium' },
-  }))
-  const create = vi.fn(async () => ok({ sessionId: 'session-worker' }))
-  const selectModel = vi.fn(async () => ok())
-  const rename = vi.fn(async () => ok({ title: 'Print WeChat document' }))
   const cancel = vi.fn(async () => ok())
-  const history = vi.fn(async () => ok({ events: [] }))
-  const sectionDispose = vi.fn()
-  const section = vi.fn(() => sectionDispose)
-  const tools = new Map<string, ToolDefinition>()
-  const toolDisposers: Array<ReturnType<typeof vi.fn>> = []
-  const register = vi.fn((definition: ToolDefinition) => {
-    tools.set(definition.name, definition)
-    const dispose = vi.fn(() => tools.delete(definition.name))
-    toolDisposers.push(dispose)
-    return dispose
-  })
-  const agent = { ctx: { systemPrompt: { section }, tools: { register } } }
-  const context = {
-    apiProxy: { sessions: { prompt, list, models, create, selectModel, rename, cancel, history } },
-    agents: { get: vi.fn(() => agent) },
-  } as never
-  return {
-    context,
-    sessions: { prompt, list, models, create, selectModel, rename, cancel, history },
-    scoped: { section, sectionDispose, register, tools, toolDisposers },
-  }
+  const respond = vi.fn(async () => ({ accepted: true as const }))
+  const context = { apiProxy: { sessions: { prompt, list, cancel }, respond } } as never
+  return { context, sessions: { prompt, list, cancel }, respond }
 }
 
-function toolContext() {
-  return { signal: new AbortController().signal } as never
-}
-
-describe('DSH-side realtime voice coordinator', () => {
-  it('attaches one scoped prompt and four DSH tools, then disposes all of them', async () => {
-    const { context, scoped } = createContext()
-    const coordinator = new DshVoiceCoordinator(context, sessionId)
-
-    await coordinator.attach()
-    expect(scoped.section).toHaveBeenCalledWith(expect.objectContaining({
-      name: 'realtime-voice:coordinator',
-      text: VOICE_COORDINATOR_PROMPT,
-    }))
-    expect([...scoped.tools.keys()]).toEqual([
-      'voice_delegate_task',
-      'voice_message_task',
-      'voice_task_status',
-      'voice_cancel_task',
-    ])
-
-    coordinator.dispose()
-    expect(scoped.sectionDispose).toHaveBeenCalledTimes(1)
-    expect(scoped.toolDisposers.every(dispose => dispose.mock.calls.length === 1)).toBe(true)
-    expect(scoped.tools.size).toBe(0)
-  })
-
-  it('submits every final transcript to the bound Agent without keyword classification', async () => {
+describe('DSH semantic execution coordinator', () => {
+  it('queues one explicit execution handoff while the bound session is idle', async () => {
     const { context, sessions } = createContext(false)
     const coordinator = new DshVoiceCoordinator(context, sessionId)
-    await coordinator.attach()
 
-    await coordinator.submitUserTurn('嗨，今天怎么样？')
-    await coordinator.submitUserTurn('打开微信里的文档并双面彩打')
+    const result = await coordinator.handoff('打开微信文档并双面彩打', '帮我把微信里的读后感彩打')
 
-    expect(sessions.prompt).toHaveBeenCalledTimes(2)
-    expect(sessions.prompt.mock.calls.map(call => call[0].payload)).toEqual([
-      expect.objectContaining({ sessionId, mode: 'queue', content: [{ type: 'text', text: '嗨，今天怎么样？' }] }),
-      expect.objectContaining({ sessionId, mode: 'queue', content: [{ type: 'text', text: '打开微信里的文档并双面彩打' }] }),
-    ])
+    expect(result).toMatchObject({ sessionId, mode: 'queue', status: 'accepted' })
+    expect(sessions.prompt).toHaveBeenCalledTimes(1)
+    expect(sessions.prompt).toHaveBeenCalledWith(expect.objectContaining({
+      payload: expect.objectContaining({
+        sessionId,
+        mode: 'queue',
+        content: [{ type: 'text', text: expect.stringContaining('<realtime_delegation') }],
+      }),
+    }))
+    expect(JSON.stringify(sessions.prompt.mock.calls[0])).toContain('打开微信文档并双面彩打')
   })
 
-  it('steers a running bound Agent instead of creating a competing voice context', async () => {
+  it('steers the same active DSH turn instead of creating a shadow worker', async () => {
     const { context, sessions } = createContext(true)
     const coordinator = new DshVoiceCoordinator(context, sessionId)
-    await coordinator.attach()
 
-    await coordinator.submitUserTurn('改成打两份')
+    const result = await coordinator.handoff('改成彩打两份', '改成两份')
+
+    expect(result.mode).toBe('steer')
     expect(sessions.prompt).toHaveBeenCalledWith(expect.objectContaining({
       payload: expect.objectContaining({ sessionId, mode: 'steer' }),
     }))
   })
 
-  it('delegates blocking work to a real DSH worker in the same cwd and model', async () => {
-    const { context, sessions, scoped } = createContext(false)
-    const onWorkerStarted = vi.fn()
-    const coordinator = new DshVoiceCoordinator(context, sessionId, { onWorkerStarted })
-    await coordinator.attach()
+  it('answers a pending DSH approval through the original mux rpcId', async () => {
+    const { context, respond } = createContext(true)
+    const coordinator = new DshVoiceCoordinator(context, sessionId)
+    const approval: PendingVoiceApproval = {
+      rpcId: 'rpc-approval',
+      approvalId: 'approval-1',
+      sessionId,
+      toolName: 'exec_command',
+      reason: '需要访问打印机',
+    }
+    coordinator.rememberApproval(approval)
 
-    const delegate = scoped.tools.get('voice_delegate_task')!
-    const result = await delegate.execute({
-      instruction: '找到微信文档，双面彩打，共两份',
-      title: '打印微信文档',
-    }, toolContext())
+    await coordinator.resolveApproval('approval-1', 'allowed-once')
 
-    expect(result).toEqual({ sessionId: 'session-worker', status: 'running', title: 'Print WeChat document' })
-    expect(sessions.create).toHaveBeenCalledWith(expect.objectContaining({ payload: { cwd: 'E:\\project' } }))
-    expect(sessions.selectModel).toHaveBeenCalledWith(expect.objectContaining({
-      payload: expect.objectContaining({
-        sessionId: 'session-worker',
-        provider: 'deepseek',
-        model: 'deepseek-chat',
-        reasoningEffort: 'medium',
-      }),
+    expect(respond).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'client-response',
+      rpcId: 'rpc-approval',
+      result: { ok: true, value: { sessionId, approvalId: 'approval-1', outcome: 'allowed-once' } },
     }))
-    expect(sessions.prompt).toHaveBeenCalledWith(expect.objectContaining({
-      payload: expect.objectContaining({
-        sessionId: 'session-worker',
-        mode: 'queue',
-        content: [{ type: 'text', text: '找到微信文档，双面彩打，共两份' }],
-      }),
+  })
+
+  it('answers a structured DSH question through the original mux rpcId', async () => {
+    const { context, respond } = createContext(true)
+    const coordinator = new DshVoiceCoordinator(context, sessionId)
+    const question: PendingVoiceQuestion = {
+      rpcId: 'rpc-question',
+      sessionId,
+      questions: [{ id: 'copies', question: '打印几份？', options: [{ label: '两份' }] }],
+    }
+    coordinator.rememberQuestion(question)
+
+    await coordinator.answerQuestion('rpc-question', [{ id: 'copies', selected: ['两份'] }])
+
+    expect(respond).toHaveBeenCalledWith(expect.objectContaining({
+      rpcId: 'rpc-question',
+      result: { ok: true, value: { sessionId, answer: { answers: [{ id: 'copies', selected: ['两份'] }] } } },
     }))
-    expect(onWorkerStarted).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'session-worker' }))
+  })
+
+  it('keeps handoff and pending-interaction state across a transport reconnect', async () => {
+    const { context } = createContext(false)
+    const shared = createDshVoiceCoordinatorState()
+    const first = new DshVoiceCoordinator(context, sessionId, shared)
+    const handoff = await first.handoff('执行任务', '执行任务')
+    first.rememberApproval({
+      rpcId: 'rpc-approval',
+      approvalId: 'approval-1',
+      sessionId,
+      toolName: 'exec_command',
+    })
+
+    const recovered = new DshVoiceCoordinator(context, sessionId, shared)
+    expect(recovered.active).toBe(true)
+    expect(recovered.listPendingApprovals()).toHaveLength(1)
+    recovered.markTurnStarted(7)
+    recovered.markTurnEnded(7, 'completed')
+    expect(shared.handoffs.get(handoff.handoffId)?.status).toBe('completed')
   })
 })

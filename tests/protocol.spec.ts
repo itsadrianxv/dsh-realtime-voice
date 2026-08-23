@@ -65,4 +65,22 @@ describe('voice wire protocol', () => {
     expect(isVoiceClientControl({ type: 'voice.ping', sentAt: Number.NaN })).toBe(false)
     expect(isVoiceClientControl({ type: 'voice.end', reason: { nope: true } })).toBe(false)
   })
+
+  it('accepts approval and structured-question answers but rejects malformed payloads', () => {
+    expect(isVoiceClientControl({
+      type: 'voice.approval-answer',
+      approvalId: 'approval-1',
+      outcome: 'allowed-once',
+    })).toBe(true)
+    expect(isVoiceClientControl({
+      type: 'voice.question-answer',
+      requestId: 'rpc-question',
+      answers: [{ id: 'copies', selected: ['两份'], custom: '彩打' }],
+    })).toBe(true)
+    expect(isVoiceClientControl({
+      type: 'voice.question-answer',
+      requestId: 'rpc-question',
+      answers: [],
+    })).toBe(false)
+  })
 })

@@ -52,4 +52,31 @@ describe('assistant realtime transcript', () => {
     expect(controller.getSnapshot().phase).toBe('listening')
     await controller.dispose()
   })
+
+  it('surfaces and answers an authoritative DSH approval without turning it into a new prompt', async () => {
+    vi.stubGlobal('WebSocket', { OPEN: 1 })
+    const controller = new VoiceCallController()
+    const receive = (controller as unknown as { receive(event: MessageEvent): void }).receive.bind(controller)
+    const send = vi.fn()
+    ;(controller as unknown as { socket: { readyState: number; send(value: string): void } }).socket = {
+      readyState: 1,
+      send,
+    }
+    receive({ data: JSON.stringify({
+      type: 'voice.approval',
+      serverSeq: 1,
+      sessionId: 'session-one',
+      status: 'pending',
+      approval: { approvalId: 'approval-one', toolName: 'exec_command', reason: '打印机访问' },
+    }) } as MessageEvent)
+
+    expect(controller.getSnapshot().pendingApproval?.approvalId).toBe('approval-one')
+    controller.answerApproval('approval-one', 'allowed-once')
+    expect(send).toHaveBeenCalledWith(JSON.stringify({
+      type: 'voice.approval-answer',
+      approvalId: 'approval-one',
+      outcome: 'allowed-once',
+    }))
+    await controller.dispose()
+  })
 })

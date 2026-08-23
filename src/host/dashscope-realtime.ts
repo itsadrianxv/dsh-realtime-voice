@@ -13,13 +13,27 @@ interface VoiceAnnouncement {
   text: string
 }
 
-/** One upstream Qwen-Audio Realtime session used only for speech I/O. */
+export interface RealtimeFunctionTool {
+  type: 'function'
+  function: {
+    name: string
+    description: string
+    parameters: Record<string, unknown>
+  }
+}
+
+/**
+ * One upstream Qwen-Audio Realtime session. It remains the responsive
+ * conversational surface and may semantically hand work to DSH through a
+ * deliberately small Function Calling vocabulary.
+ */
 export class DashScopeRealtime {
   private socket: WebSocket | undefined
   private readonly queuedAnnouncements: VoiceAnnouncement[] = []
   private readonly announcedIds = new Set<string>()
   private responseActive = false
   private responseRequested = false
+  private followupResponsePending = false
   private inputSpeechActive = false
   private closed = false
 
@@ -27,6 +41,7 @@ export class DashScopeRealtime {
     private readonly config: VoiceConfig,
     private readonly apiKey: string,
     private readonly instructions: string,
+    private readonly tools: readonly RealtimeFunctionTool[],
     private readonly callbacks: DashScopeRealtimeCallbacks,
     private readonly socketFactory: RealtimeSocketFactory = (url, options) => new WebSocket(url, options),
   ) {}
@@ -73,6 +88,7 @@ export class DashScopeRealtime {
                 input_audio_format: 'pcm',
                 output_audio_format: 'pcm',
                 max_history_turns: this.config.maxHistoryTurns,
+                tools: this.tools,
                 turn_detection: this.config.turnDetection === 'server_vad'
                   ? {
                       type: 'server_vad',
@@ -123,10 +139,27 @@ export class DashScopeRealtime {
     this.send({ type: 'response.cancel' })
   }
 
-  /** Feed a completed durable DSH turn back into the short-lived voice context and speak it once. */
-  announceAgentResult(text: string, eventSeq: number): void {
-    const id = `dsh_agent_${eventSeq}`
-    this.queueAnnouncement(id, `DSH Agent 刚完成了一次工作。以下是 DSH 会话中的权威最终回复。请用自然、简短的中文主动向用户播报结果，不要重复提交任务：\n${text.slice(0, 2_000)}`)
+  /** Return a completed Function Call without blocking the live conversation. */
+  completeFunctionCall(callId: string, output: unknown): void {
+    if (this.closed) return
+    this.send({
+      type: 'conversation.item.create',
+      item: {
+        type: 'function_call_output',
+        call_id: callId,
+        output: JSON.stringify(output),
+      },
+    })
+    this.requestResponseAfterCurrent()
+  }
+
+  /**
+   * Inject an authoritative backend event into the Realtime conversation.
+   * Qwen turns the tagged event into a short spoken update; it never treats it
+   * as a fresh user task.
+   */
+  announceBackendEvent(id: string, text: string): void {
+    this.queueAnnouncement(id, `[BACKEND]\n${text.slice(0, 4_000)}`)
   }
 
   private queueAnnouncement(id: string, text: string): void {
@@ -162,6 +195,11 @@ export class DashScopeRealtime {
     if (event.type !== 'response.done') return
     this.responseActive = false
     this.responseRequested = false
+    if (this.followupResponsePending) {
+      this.followupResponsePending = false
+      this.requestResponse()
+      return
+    }
     this.drainAgentAnnouncements()
   }
 
@@ -177,7 +215,7 @@ export class DashScopeRealtime {
       item: {
         id: announcement.id,
         type: 'message',
-        role: 'system',
+        role: 'user',
         content: [{
           type: 'input_text',
           text: announcement.text,
@@ -188,8 +226,20 @@ export class DashScopeRealtime {
   }
 
   private requestResponse(): void {
+    if (this.closed || this.responseActive || this.responseRequested) {
+      this.followupResponsePending = true
+      return
+    }
     this.responseRequested = true
     this.send({ type: 'response.create' })
+  }
+
+  private requestResponseAfterCurrent(): void {
+    if (this.responseActive || this.responseRequested || this.inputSpeechActive) {
+      this.followupResponsePending = true
+      return
+    }
+    this.requestResponse()
   }
 
   /** A plugin callback must never be able to escape a ws EventEmitter turn and crash DSH. */
