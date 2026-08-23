@@ -30,6 +30,7 @@ export declare class VoiceConnection {
     private agentWorkPending;
     private closed;
     private ready;
+    private leaseAcquired;
     private helloTimer;
     private hostEventsAbort;
     private readonly pendingAssistantByTurn;

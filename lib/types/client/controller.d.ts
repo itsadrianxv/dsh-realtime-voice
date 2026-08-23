@@ -1,5 +1,5 @@
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots';
-import { type VoiceApproval, type VoicePhase, type VoiceQuestion, type VoiceQuestionAnswer } from '../protocol.ts';
+import { type VoiceApproval, type VoicePhase, type VoiceQuestion, type VoiceQuestionAnswer, type VoiceOccupancyStatus } from '../protocol.ts';
 export type ClientVoicePhase = 'idle' | 'requesting-permission' | VoicePhase | 'error';
 export interface VoiceSnapshot {
     phase: ClientVoicePhase;
@@ -15,6 +15,7 @@ export interface VoiceSnapshot {
     providerModel?: string;
     turnDetection?: 'server_vad' | 'smart_turn';
     elapsedSeconds: number;
+    occupancy?: VoiceOccupancyStatus;
     error?: string | undefined;
 }
 /** Root-lifetime call controller shared by the session button and frame overlay through inject hooks. */
@@ -33,8 +34,10 @@ export declare class VoiceCallController implements HostObservable<VoiceSnapshot
     private connectionEpoch;
     private lastReconnectError;
     private ending;
+    private presenceTimer;
     getSnapshot: () => VoiceSnapshot;
     subscribe: (listener: () => void) => (() => void);
+    startPresence(): void;
     start(sessionId: string): Promise<void>;
     end(): Promise<void>;
     toggleMute(): void;
@@ -52,5 +55,6 @@ export declare class VoiceCallController implements HostObservable<VoiceSnapshot
     private handleLocalSpeechStart;
     private fail;
     private cleanup;
+    private refreshPresence;
     private update;
 }

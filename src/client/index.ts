@@ -24,6 +24,7 @@ export const inject = ['slots', 'sessions', 'connection', 'remote', 'settingsSco
 /** Register one composer action and one frame overlay; both disappear with this client fiber. */
 export function apply(ctx: ClientContext): void {
   const voice = new VoiceCallController()
+  voice.startPresence()
   const { api } = ctx.get('connection') as ConnectionHandle
   const modelSettings = new VoiceModelSettingsController(ctx.settingsScope.bind({
     namespace: REALTIME_VOICE_SETTINGS_NAMESPACE,

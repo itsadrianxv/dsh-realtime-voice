@@ -31,6 +31,8 @@ All multi-byte header integers are big-endian. One WebSocket binary message cont
 
 The first client frame is `voice.hello`. It pins the call to one DSH Session id; changing the visible WebUI or Mini Program page never retargets an active call. A disconnected voice socket never cancels the DSH Agent. `voice.hello.resume` may recover the same short-lived call ledger and pending interaction cards; DSH remains the durable task source of truth.
 
+The DSH Host owns one process-wide voice lease. Acquisition happens atomically while handling `voice.hello`, before any DashScope connection is created. A second WebUI or Mini Program client receives `voice.busy` and cannot stream audio. `GET /plugins/realtime-voice/v1/status` exposes only the active client platform, bound DSH session id, voice session id, and timestamps, so every surface can render the same occupancy state. Closing or backgrounding the owning transport releases the lease without cancelling Agent work. A reconnect may replace a stale transport only when it presents the same `voiceSessionId` and the same DSH `sessionId`.
+
 Qwen Audio Realtime is the conversational plane. It answers ordinary conversation itself and invokes a deliberately narrow Function Calling vocabulary only when real execution is required. `handoff_to_dsh_agent` queues work when the pinned DSH session is idle and steers the same turn when it is running. DSH progress and terminal events are tagged and injected back into the Realtime conversation; an accepted handoff is never represented as completed work.
 
 DSH approval and structured-question events are first-class protocol messages:

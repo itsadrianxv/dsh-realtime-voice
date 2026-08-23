@@ -11,13 +11,16 @@ export type VoiceButtonProps = PropsRuntime<'conversation.input.right'> & Inject
 /** Compact call control in the official composer right-hand action slot. */
 export function VoiceButton({ useVoice, toggle }: VoiceButtonProps) {
   const phase = useVoice(snapshot => snapshot.phase)
+  const occupied = useVoice(snapshot => snapshot.occupancy?.active === true)
   const active = phase !== 'idle' && phase !== 'error'
+  const unavailable = occupied && !active
   return (
     <button
       type="button"
       className={`${styles.callButton} ${active ? styles.callButtonActive : ''}`}
-      aria-label={active ? '结束实时语音' : '开始实时语音'}
-      title={active ? '结束实时语音' : '实时语音'}
+      aria-label={active ? '结束实时语音' : unavailable ? '实时语音已被其他客户端占用' : '开始实时语音'}
+      title={active ? '结束实时语音' : unavailable ? '另一端正在使用实时语音' : '实时语音'}
+      disabled={unavailable}
       onClick={toggle}
     >
       {active ? <span className={styles.stopGlyph} /> : <CallGlyph />}

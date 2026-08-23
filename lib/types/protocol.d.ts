@@ -2,6 +2,7 @@
 export declare const VOICE_PROTOCOL: "dsh.voice.v1";
 export declare const VOICE_PROTOCOL_VERSION: 1;
 export declare const VOICE_ROUTE: "/plugins/realtime-voice/v1";
+export declare const VOICE_STATUS_ROUTE: "/plugins/realtime-voice/v1/status";
 export declare const INPUT_SAMPLE_RATE: 16000;
 export declare const OUTPUT_SAMPLE_RATE: 24000;
 export declare const AUDIO_CHANNELS: 1;
@@ -113,7 +114,24 @@ export interface VoiceReady {
         persistentAgentTask: true;
     };
 }
+export interface VoiceOccupancyOwner {
+    platform: VoiceClientPlatform;
+    clientVersion: string;
+    sessionId: string;
+    voiceSessionId: string;
+    startedAt: number;
+    lastSeenAt: number;
+}
+export interface VoiceOccupancyStatus {
+    protocol: typeof VOICE_PROTOCOL;
+    active: boolean;
+    owner?: VoiceOccupancyOwner;
+}
 export type VoiceServerControl = VoiceReady | {
+    type: 'voice.busy';
+    serverSeq: number;
+    occupancy: VoiceOccupancyStatus;
+} | {
     type: 'voice.state';
     serverSeq: number;
     phase: VoicePhase;

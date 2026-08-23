@@ -8,10 +8,12 @@ import {
   OUTPUT_SAMPLE_RATE,
   VOICE_PROTOCOL,
   VOICE_ROUTE,
+  VOICE_STATUS_ROUTE,
   type VoiceApproval,
   type VoicePhase,
   type VoiceQuestion,
   type VoiceQuestionAnswer,
+  type VoiceOccupancyStatus,
   type VoiceServerControl,
 } from '../protocol.ts'
 import { BrowserAudioEngine } from './audio-engine.ts'
@@ -32,6 +34,7 @@ export interface VoiceSnapshot {
   providerModel?: string
   turnDetection?: 'server_vad' | 'smart_turn'
   elapsedSeconds: number
+  occupancy?: VoiceOccupancyStatus
   error?: string | undefined
 }
 
@@ -60,6 +63,7 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
   private connectionEpoch = 0
   private lastReconnectError: string | undefined
   private ending = false
+  private presenceTimer: ReturnType<typeof setInterval> | undefined
 
   getSnapshot = (): VoiceSnapshot => this.snapshot
 
@@ -68,10 +72,28 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
     return () => this.listeners.delete(listener)
   }
 
+  startPresence(): void {
+    if (this.presenceTimer !== undefined) return
+    void this.refreshPresence()
+    this.presenceTimer = setInterval(() => {
+      if (document.visibilityState !== 'hidden') void this.refreshPresence()
+    }, 2_000)
+  }
+
   async start(sessionId: string): Promise<void> {
     if (this.snapshot.phase !== 'idle' && this.snapshot.phase !== 'error') return
     if (!window.isSecureContext || navigator.mediaDevices?.getUserMedia === undefined) {
       this.update({ ...INITIAL_SNAPSHOT, phase: 'error', error: '实时语音需要安全上下文：请使用 localhost 或 HTTPS。' })
+      return
+    }
+    const occupancy = await this.refreshPresence()
+    if (occupancy?.active) {
+      this.update({
+        ...INITIAL_SNAPSHOT,
+        occupancy,
+        phase: 'error',
+        error: busyMessage(occupancy),
+      })
       return
     }
     this.ending = false
@@ -130,6 +152,8 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
 
   async dispose(): Promise<void> {
     this.ending = true
+    if (this.presenceTimer !== undefined) clearInterval(this.presenceTimer)
+    this.presenceTimer = undefined
     await this.cleanup()
     this.listeners.clear()
   }
@@ -219,6 +243,12 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
           this.scheduleReconnect(sessionId)
           rejectOnce(new Error(message.message))
         }
+        if (message.type === 'voice.busy') {
+          socket.removeEventListener('message', ready)
+          const reason = busyMessage(message.occupancy)
+          this.lastReconnectError = reason
+          rejectOnce(new Error(reason))
+        }
       }
       socket.addEventListener('message', ready)
       socket.onclose = (event) => {
@@ -261,6 +291,9 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
           agentRunning: message.target.running,
           error: undefined,
         })
+        return
+      case 'voice.busy':
+        void this.fail(busyMessage(message.occupancy))
         return
       case 'voice.state':
         this.update({
@@ -403,8 +436,26 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
     this.inputStreamId += 1
   }
 
+  private async refreshPresence(): Promise<VoiceOccupancyStatus | undefined> {
+    try {
+      const response = await fetch(VOICE_STATUS_ROUTE, { cache: 'no-store' })
+      if (!response.ok) return undefined
+      const occupancy = await response.json() as VoiceOccupancyStatus
+      if (occupancy.protocol !== VOICE_PROTOCOL || typeof occupancy.active !== 'boolean') return undefined
+      this.update({ ...this.snapshot, occupancy })
+      return occupancy
+    } catch {
+      return undefined
+    }
+  }
+
   private update(next: VoiceSnapshot): void {
     this.snapshot = next
     for (const listener of this.listeners) listener()
   }
+}
+
+function busyMessage(occupancy: VoiceOccupancyStatus): string {
+  const platform = occupancy.owner?.platform === 'wechat-mini-program' ? '微信小程序' : '另一个客户端'
+  return `实时语音正由${platform}占用，请先在该端结束通话。`
 }

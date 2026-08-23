@@ -1,6 +1,6 @@
 /** DSH Host half: same-process realtime voice route, provider bridge, and complete disposal. */
 import type { Duplex } from 'node:stream'
-import type { IncomingMessage } from 'node:http'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-credentials'
@@ -10,7 +10,7 @@ import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-sett
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-tools'
 import { WebSocketServer } from 'ws'
-import { VOICE_ROUTE } from './protocol.ts'
+import { VOICE_ROUTE, VOICE_STATUS_ROUTE } from './protocol.ts'
 import { Config, type VoiceConfig } from './host/config.ts'
 import { VoiceConnection } from './host/voice-connection.ts'
 import { VoiceRuntime } from './host/voice-runtime.ts'
@@ -62,10 +62,30 @@ export function apply(ctx: Context, config: VoiceConfig): void {
     })
   }
 
+  const status = (request: IncomingMessage, response: ServerResponse): void => {
+    if (request.method !== 'GET') {
+      response.writeHead(405, { Allow: 'GET' })
+      response.end()
+      return
+    }
+    if (!isLoopback(request.socket.remoteAddress) || !isAllowedOrigin(request)) {
+      response.writeHead(403)
+      response.end()
+      return
+    }
+    response.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+    })
+    response.end(JSON.stringify(voiceRuntime.occupancy()))
+  }
+
   ctx.effect(() => {
+    const unregisterStatus = ctx.webServer.register({ kind: 'exact', path: VOICE_STATUS_ROUTE, handler: status })
     const unregister = ctx.webServer.registerUpgrade({ path: VOICE_ROUTE, handler: upgrade })
     return async () => {
       unregister()
+      unregisterStatus()
       for (const connection of [...connections]) connection.dispose()
       connections.clear()
       voiceRuntime.clear()

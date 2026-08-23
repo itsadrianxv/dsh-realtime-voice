@@ -3,6 +3,7 @@
 export const VOICE_PROTOCOL = 'dsh.voice.v1' as const
 export const VOICE_PROTOCOL_VERSION = 1 as const
 export const VOICE_ROUTE = '/plugins/realtime-voice/v1' as const
+export const VOICE_STATUS_ROUTE = '/plugins/realtime-voice/v1/status' as const
 
 export const INPUT_SAMPLE_RATE = 16_000 as const
 export const OUTPUT_SAMPLE_RATE = 24_000 as const
@@ -113,7 +114,23 @@ export interface VoiceReady {
   }
 }
 
+export interface VoiceOccupancyOwner {
+  platform: VoiceClientPlatform
+  clientVersion: string
+  sessionId: string
+  voiceSessionId: string
+  startedAt: number
+  lastSeenAt: number
+}
+
+export interface VoiceOccupancyStatus {
+  protocol: typeof VOICE_PROTOCOL
+  active: boolean
+  owner?: VoiceOccupancyOwner
+}
+
 export type VoiceServerControl = VoiceReady
+  | { type: 'voice.busy'; serverSeq: number; occupancy: VoiceOccupancyStatus }
   | { type: 'voice.state'; serverSeq: number; phase: VoicePhase }
   | {
     type: 'voice.transcript'

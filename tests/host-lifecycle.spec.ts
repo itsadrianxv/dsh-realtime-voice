@@ -18,12 +18,14 @@ const config: VoiceConfig = {
 }
 
 describe('Host plugin lifecycle', () => {
-  it('registers exactly one official upgrade route and unregisters it on dispose', async () => {
+  it('registers the call route and occupancy endpoint and unregisters both on dispose', async () => {
     const unregister = vi.fn()
+    const unregisterStatus = vi.fn()
     const registerUpgrade = vi.fn(() => unregister)
+    const register = vi.fn(() => unregisterStatus)
     let lifecycle: (() => void | Promise<void>) | undefined
     const context = {
-      webServer: { registerUpgrade },
+      webServer: { register, registerUpgrade },
       effect: vi.fn((factory: () => () => void | Promise<void>) => {
         lifecycle = factory()
       }),
@@ -35,9 +37,12 @@ describe('Host plugin lifecycle', () => {
     apply(context as never, config)
     expect(registerUpgrade).toHaveBeenCalledTimes(1)
     expect(registerUpgrade.mock.calls[0]?.[0]).toMatchObject({ path: VOICE_ROUTE })
+    expect(register).toHaveBeenCalledTimes(1)
+    expect(register.mock.calls[0]?.[0]).toMatchObject({ kind: 'exact', path: `${VOICE_ROUTE}/status` })
     expect(lifecycle).toBeTypeOf('function')
 
     await lifecycle?.()
     expect(unregister).toHaveBeenCalledTimes(1)
+    expect(unregisterStatus).toHaveBeenCalledTimes(1)
   })
 })

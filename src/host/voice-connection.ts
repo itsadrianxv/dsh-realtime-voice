@@ -53,6 +53,7 @@ export class VoiceConnection {
   private agentWorkPending = false
   private closed = false
   private ready = false
+  private leaseAcquired = false
   private helloTimer: ReturnType<typeof setTimeout>
   private hostEventsAbort: AbortController | undefined
   private readonly pendingAssistantByTurn = new Map<string, string>()
@@ -91,6 +92,10 @@ export class VoiceConnection {
     this.coordinator = undefined
     this.provider?.close()
     this.provider = undefined
+    if (this.leaseAcquired) {
+      this.leaseAcquired = false
+      this.runtime.release(this.provisionalId)
+    }
     if (this.socket.readyState === this.socket.OPEN || this.socket.readyState === this.socket.CONNECTING) {
       this.socket.close(1001, reason)
     }
@@ -99,6 +104,7 @@ export class VoiceConnection {
 
   private async receive(raw: WebSocket.RawData, isBinary: boolean): Promise<void> {
     if (this.closed) return
+    if (this.continuity !== undefined) this.runtime.touch(this.continuity)
     if (isBinary) {
       if (this.provider === undefined) throw new Error('audio arrived before voice.ready')
       const bytes = normalizeRawData(raw)
@@ -144,6 +150,7 @@ export class VoiceConnection {
         await this.answerQuestion(parsed.requestId, parsed.answers)
         return
       case 'voice.ping':
+        if (this.continuity !== undefined) this.runtime.touch(this.continuity)
         this.send({ type: 'voice.pong', serverSeq: this.nextSeq(), sentAt: parsed.sentAt })
         return
     }
@@ -153,7 +160,21 @@ export class VoiceConnection {
     validateAudioNegotiation(hello)
     clearTimeout(this.helloTimer)
     this.hello = hello
-    this.continuity = this.runtime.acquire(hello.resume?.voiceSessionId, hello.target.sessionId)
+    const lease = this.runtime.acquireLease({
+      connectionId: this.provisionalId,
+      platform: hello.client.platform,
+      clientVersion: hello.client.version,
+      sessionId: hello.target.sessionId,
+      ...(hello.resume === undefined ? {} : { resumeId: hello.resume.voiceSessionId }),
+      revoke: () => this.dispose('voice-resumed-elsewhere'),
+    })
+    if (!lease.ok) {
+      this.send({ type: 'voice.busy', serverSeq: this.nextSeq(), occupancy: lease.occupancy })
+      this.dispose('voice-busy')
+      return
+    }
+    this.leaseAcquired = true
+    this.continuity = lease.state
     this.session = new DshVoiceSession(this.ctx, hello.target.sessionId)
     const status = await this.session.snapshot()
     const coordinator = new DshVoiceCoordinator(this.ctx, hello.target.sessionId, this.continuity.coordinator)

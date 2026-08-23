@@ -25,6 +25,13 @@
   transform: translateY(-2px) scale(.94);
 }
 
+.callButton:disabled {
+  color: color-mix(in srgb, currentColor 48%, transparent);
+  background: color-mix(in srgb, var(--dsw-alias-surface-secondary, #eef0f5) 90%, transparent);
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
 .callButtonActive {
   color: var(--dsw-alias-button-danger-text, #fff);
   background: var(--dsw-alias-button-danger-fill, #e5484d);
