@@ -1,106 +1,23 @@
 import WebSocket, { type ClientOptions } from 'ws'
 import type { VoiceConfig } from './config.ts'
-import type { VoiceToolCall, VoiceToolResult } from './dsh-tools.ts'
 
 export interface DashScopeRealtimeCallbacks {
   onEvent: (event: DashScopeServerEvent) => void
-  onTool: (call: VoiceToolCall) => Promise<VoiceToolResult>
 }
 
 export type DashScopeServerEvent = Record<string, unknown> & { type: string }
 export type RealtimeSocketFactory = (url: URL, options: ClientOptions) => WebSocket
 
-interface PendingTool {
-  call: VoiceToolCall
-  result: Promise<VoiceToolResult>
-}
-
-interface AgentAnnouncement {
-  eventSeq: number
+interface VoiceAnnouncement {
+  id: string
   text: string
 }
 
-const TOOL_DEFINITIONS = [
-  {
-    type: 'function',
-    function: {
-      name: 'start_task',
-      description: '在当前 DeepSeek Harness 会话中开始一个新的 Agent 工作。',
-      parameters: {
-        type: 'object',
-        properties: { instruction: { type: 'string', description: '交给编码 Agent 的完整任务要求。' } },
-        required: ['instruction'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'send_task_message',
-      description: '向当前 DSH 任务追加要求；运行中需要立刻改变方向时使用 steer。',
-      parameters: {
-        type: 'object',
-        properties: {
-          instruction: { type: 'string', description: '要交给编码 Agent 的要求。' },
-          mode: { type: 'string', enum: ['auto', 'queue', 'steer'], description: '默认 auto；steer 立即纠偏，queue 排入下一轮。' },
-        },
-        required: ['instruction'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_task_status',
-      description: '读取当前 DSH 会话是否运行以及最近的 Agent 结果。',
-      parameters: { type: 'object', properties: {} },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'list_sessions',
-      description: '按标题或工作区关键词检索 DSH 会话。用户提到其他项目、线程或会话时先调用它，再用返回的 sessionId 读取回复。',
-      parameters: {
-        type: 'object',
-        properties: {
-          query: { type: 'string', description: '会话标题或主题关键词，例如“做成微信小程序”。' },
-          workspace: { type: 'string', description: '工作区目录或名称关键词，例如“deepseek-harness”。' },
-          limit: { type: 'integer', minimum: 1, maximum: 10, description: '最多返回多少条，默认 5。' },
-        },
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_session_latest_reply',
-      description: '读取指定 DSH 会话最后一条 Agent 回复；sessionId 必须来自 list_sessions 的结果。',
-      parameters: {
-        type: 'object',
-        properties: {
-          sessionId: { type: 'string', description: '准确的 DSH sessionId。' },
-        },
-        required: ['sessionId'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'cancel_task',
-      description: '停止当前 DSH 会话正在执行的 Agent 回合，但保留排队任务。',
-      parameters: { type: 'object', properties: {} },
-    },
-  },
-] as const
-
-/** One upstream Qwen-Audio Realtime session with contained Function Calling. */
+/** One upstream Qwen-Audio Realtime session used only for speech I/O. */
 export class DashScopeRealtime {
   private socket: WebSocket | undefined
-  private readonly pendingTools = new Map<string, PendingTool[]>()
-  private readonly queuedAgentAnnouncements: AgentAnnouncement[] = []
-  private readonly announcedEventSeqs = new Set<number>()
+  private readonly queuedAnnouncements: VoiceAnnouncement[] = []
+  private readonly announcedIds = new Set<string>()
   private responseActive = false
   private responseRequested = false
   private inputSpeechActive = false
@@ -156,7 +73,6 @@ export class DashScopeRealtime {
                 input_audio_format: 'pcm',
                 output_audio_format: 'pcm',
                 max_history_turns: this.config.maxHistoryTurns,
-                tools: TOOL_DEFINITIONS,
                 turn_detection: this.config.turnDetection === 'server_vad'
                   ? {
                       type: 'server_vad',
@@ -209,10 +125,15 @@ export class DashScopeRealtime {
 
   /** Feed a completed durable DSH turn back into the short-lived voice context and speak it once. */
   announceAgentResult(text: string, eventSeq: number): void {
-    if (this.closed || this.announcedEventSeqs.has(eventSeq)) return
-    this.announcedEventSeqs.add(eventSeq)
-    this.queuedAgentAnnouncements.push({ eventSeq, text: text.slice(0, 2_000) })
-    if (this.queuedAgentAnnouncements.length > 3) this.queuedAgentAnnouncements.shift()
+    const id = `dsh_agent_${eventSeq}`
+    this.queueAnnouncement(id, `DSH Agent 刚完成了一次工作。以下是 DSH 会话中的权威最终回复。请用自然、简短的中文主动向用户播报结果，不要重复提交任务：\n${text.slice(0, 2_000)}`)
+  }
+
+  private queueAnnouncement(id: string, text: string): void {
+    if (this.closed || this.announcedIds.has(id)) return
+    this.announcedIds.add(id)
+    this.queuedAnnouncements.push({ id, text })
+    if (this.queuedAnnouncements.length > 4) this.queuedAnnouncements.shift()
     this.drainAgentAnnouncements()
   }
 
@@ -238,65 +159,10 @@ export class DashScopeRealtime {
       this.responseRequested = false
       return
     }
-    if (event.type === 'response.function_call_arguments.done') {
-      const responseId = stringField(event, 'response_id')
-      const call: VoiceToolCall = {
-        callId: stringField(event, 'call_id'),
-        name: stringField(event, 'name'),
-        arguments: stringField(event, 'arguments'),
-      }
-      const pending = this.pendingTools.get(responseId) ?? []
-      pending.push({ call, result: Promise.resolve().then(() => this.callbacks.onTool(call)) })
-      this.pendingTools.set(responseId, pending)
-      return
-    }
     if (event.type !== 'response.done') return
     this.responseActive = false
     this.responseRequested = false
-    const response = event.response as Record<string, unknown> | undefined
-    const responseId = typeof response?.id === 'string' ? response.id : undefined
-    if (responseId === undefined) {
-      this.drainAgentAnnouncements()
-      return
-    }
-    const pending = this.pendingTools.get(responseId)
-    if (pending === undefined || pending.length === 0) {
-      this.drainAgentAnnouncements()
-      return
-    }
-    this.pendingTools.delete(responseId)
-    // Reserve the next response while DSH executes the tool so a simultaneous
-    // Agent-completion announcement cannot race the function result follow-up.
-    this.responseRequested = true
-    void this.finishTools(pending).catch((error: unknown) => {
-      this.responseRequested = false
-      if (!this.closed) this.emitEvent({
-        type: 'error',
-        error: {
-          type: 'client_tool_error',
-          message: error instanceof Error ? error.message : String(error),
-        },
-      })
-    })
-  }
-
-  private async finishTools(pending: PendingTool[]): Promise<void> {
-    const resolved = await Promise.all(pending.map(async item => ({
-      call: item.call,
-      result: await item.result,
-    })))
-    if (this.closed) return
-    for (const item of resolved) {
-      this.send({
-        type: 'conversation.item.create',
-        item: {
-          type: 'function_call_output',
-          call_id: item.call.callId,
-          output: item.result.output,
-        },
-      })
-    }
-    this.requestResponse()
+    this.drainAgentAnnouncements()
   }
 
   private drainAgentAnnouncements(): void {
@@ -304,17 +170,17 @@ export class DashScopeRealtime {
       || this.inputSpeechActive
       || this.responseActive
       || this.responseRequested
-      || this.queuedAgentAnnouncements.length === 0) return
-    const announcement = this.queuedAgentAnnouncements.shift()!
+      || this.queuedAnnouncements.length === 0) return
+    const announcement = this.queuedAnnouncements.shift()!
     this.send({
       type: 'conversation.item.create',
       item: {
-        id: `dsh_agent_${announcement.eventSeq}`,
+        id: announcement.id,
         type: 'message',
         role: 'system',
         content: [{
           type: 'input_text',
-          text: `DSH Agent 刚完成了一次工作。以下是 DSH 会话中的权威最终回复。请用自然、简短的中文主动向用户播报结果，不要重复提交任务：\n${announcement.text}`,
+          text: announcement.text,
         }],
       },
     })
@@ -340,10 +206,4 @@ export class DashScopeRealtime {
     if (this.socket?.readyState !== WebSocket.OPEN) throw new Error('DashScope realtime socket is not open')
     this.socket.send(JSON.stringify(message))
   }
-}
-
-function stringField(value: Record<string, unknown>, field: string): string {
-  const result = value[field]
-  if (typeof result !== 'string') throw new Error(`DashScope event is missing ${field}`)
-  return result
 }

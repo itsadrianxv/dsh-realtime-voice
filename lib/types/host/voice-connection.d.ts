@@ -18,9 +18,13 @@ export declare class VoiceConnection {
     private nextInputSequence;
     private hello;
     private provider;
-    private tools;
+    private session;
+    private coordinator;
     private activeResponseId;
     private readonly suppressedResponses;
+    private readonly providerUserResponses;
+    private awaitingProviderUserResponse;
+    private agentWorkPending;
     private closed;
     private ready;
     private helloTimer;
@@ -31,7 +35,8 @@ export declare class VoiceConnection {
     private receive;
     private start;
     private onProviderEvent;
-    private runTool;
+    /** Send every semantic voice turn to the bound DSH Agent without intent classification. */
+    private submitUserTurn;
     private followDshEvents;
     private clearPlayback;
     /** Stop one response exactly once, even when local and provider VAD race. */
@@ -43,3 +48,10 @@ export declare class VoiceConnection {
     private nextSeq;
     private rpcId;
 }
+export declare function buildInstructions(status: {
+    running: boolean;
+    blank: boolean;
+    cwd?: string;
+    title?: string;
+    summary?: string;
+}): string;

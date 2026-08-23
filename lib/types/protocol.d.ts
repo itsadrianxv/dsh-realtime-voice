@@ -73,7 +73,7 @@ export interface VoiceReady {
     };
     capabilities: {
         bargeIn: true;
-        functionCalling: true;
+        functionCalling: boolean;
         reconnect: true;
         persistentAgentTask: true;
     };

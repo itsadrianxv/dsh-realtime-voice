@@ -2,4 +2,4 @@
 - insert:
     - id: realtime-voice
       name: '@harness-remote/dsh-realtime-voice'
-      inject: [webServer, apiProxy, credentials]
+      inject: [webServer, apiProxy, credentials, agents, systemPrompt, tools]

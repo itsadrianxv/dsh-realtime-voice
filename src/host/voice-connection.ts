@@ -18,7 +18,8 @@ import {
 } from '../protocol.ts'
 import type { VoiceConfig } from './config.ts'
 import { DashScopeRealtime, type DashScopeServerEvent } from './dashscope-realtime.ts'
-import { assistantText, DshVoiceTools, type VoiceToolCall } from './dsh-tools.ts'
+import { DshVoiceCoordinator } from './dsh-coordinator.ts'
+import { assistantText, DshVoiceSession } from './dsh-session-state.ts'
 import { isWebSocketSendError } from './websocket-send.ts'
 
 /** One browser or Mini Program call, pinned to one DSH session for its full lifetime. */
@@ -32,14 +33,18 @@ export class VoiceConnection {
   private nextInputSequence = 0
   private hello: VoiceHello | undefined
   private provider: DashScopeRealtime | undefined
-  private tools: DshVoiceTools | undefined
+  private session: DshVoiceSession | undefined
+  private coordinator: DshVoiceCoordinator | undefined
   private activeResponseId: string | undefined
   private readonly suppressedResponses = new Set<string>()
+  private readonly providerUserResponses = new Set<string>()
+  private awaitingProviderUserResponse = false
+  private agentWorkPending = false
   private closed = false
   private ready = false
   private helloTimer: ReturnType<typeof setTimeout>
   private hostEventsAbort: AbortController | undefined
-  private readonly pendingAssistantByTurn = new Map<number, string>()
+  private readonly pendingAssistantByTurn = new Map<string, string>()
 
   constructor(
     private readonly ctx: Context,
@@ -67,6 +72,8 @@ export class VoiceConnection {
     this.closed = true
     clearTimeout(this.helloTimer)
     this.hostEventsAbort?.abort()
+    this.coordinator?.dispose()
+    this.coordinator = undefined
     this.provider?.close()
     this.provider = undefined
     if (this.socket.readyState === this.socket.OPEN || this.socket.readyState === this.socket.CONNECTING) {
@@ -125,8 +132,26 @@ export class VoiceConnection {
     validateAudioNegotiation(hello)
     clearTimeout(this.helloTimer)
     this.hello = hello
-    this.tools = new DshVoiceTools(this.ctx, hello.target.sessionId)
-    const status = await this.tools.status()
+    this.session = new DshVoiceSession(this.ctx, hello.target.sessionId)
+    const status = await this.session.snapshot()
+    const coordinator = new DshVoiceCoordinator(this.ctx, hello.target.sessionId, {
+      onWorkerStarted: worker => this.send({
+        type: 'voice.agent-status',
+        serverSeq: this.nextSeq(),
+        sessionId: worker.sessionId,
+        running: true,
+        ...(worker.title === undefined ? {} : { summary: worker.title }),
+      }),
+      onWorkerUpdated: worker => this.send({
+        type: 'voice.agent-status',
+        serverSeq: this.nextSeq(),
+        sessionId: worker.sessionId,
+        running: worker.running,
+        ...(worker.title === undefined ? {} : { summary: worker.title }),
+      }),
+    })
+    await coordinator.attach()
+    this.coordinator = coordinator
     const credential = await this.ctx.credentials.resolve(credentialRef(this.config.apiKeyEnv))
     if (credential === undefined) {
       this.fail(
@@ -139,7 +164,6 @@ export class VoiceConnection {
     const instructions = buildInstructions(status)
     const provider = new DashScopeRealtime(this.config, credential.value, instructions, {
       onEvent: event => this.onProviderEvent(event),
-      onTool: call => this.runTool(call),
     })
     this.provider = provider
     await provider.connect()
@@ -162,7 +186,7 @@ export class VoiceConnection {
         output: { encoding: 'pcm_s16le', sampleRate: OUTPUT_SAMPLE_RATE, channels: AUDIO_CHANNELS, frameDurationMs: 40 },
         maxBinaryFrameBytes: this.config.maxBinaryFrameBytes,
       },
-      capabilities: { bargeIn: true, functionCalling: true, reconnect: true, persistentAgentTask: true },
+      capabilities: { bargeIn: true, functionCalling: false, reconnect: true, persistentAgentTask: true },
     })
     this.sendState('listening')
     this.followDshEvents(hello.target.sessionId)
@@ -179,24 +203,33 @@ export class VoiceConnection {
         this.sendState('listening')
         return
       case 'input_audio_buffer.speech_stopped':
+        this.awaitingProviderUserResponse = true
         this.sendState('thinking')
         return
       case 'conversation.item.input_audio_transcription.delta':
         this.sendTranscript('user', false, field(event, 'text'), optionalField(event, 'stash'))
         return
-      case 'conversation.item.input_audio_transcription.completed':
-        this.sendTranscript('user', true, field(event, 'transcript'))
+      case 'conversation.item.input_audio_transcription.completed': {
+        const transcript = field(event, 'transcript')
+        this.sendTranscript('user', true, transcript)
+        void this.submitUserTurn(transcript)
         return
+      }
       case 'response.created': {
         const response = event.response as Record<string, unknown> | undefined
         this.activeResponseId = typeof response?.id === 'string' ? response.id : undefined
+        if (this.activeResponseId !== undefined && this.awaitingProviderUserResponse) {
+          this.awaitingProviderUserResponse = false
+          this.providerUserResponses.add(this.activeResponseId)
+        }
         this.sendState('thinking')
         return
       }
       case 'response.audio.delta': {
         const responseId = optionalField(event, 'response_id')
         const effectiveResponseId = responseId ?? this.activeResponseId
-        if (effectiveResponseId !== undefined && this.suppressedResponses.has(effectiveResponseId)) return
+        if (effectiveResponseId !== undefined
+          && (this.suppressedResponses.has(effectiveResponseId) || this.providerUserResponses.has(effectiveResponseId))) return
         const audio = Buffer.from(field(event, 'delta'), 'base64')
         const sequence = this.outputSeq++
         const frame = encodeAudioFrame(
@@ -215,17 +248,20 @@ export class VoiceConnection {
         return
       }
       case 'response.audio_transcript.delta':
+        if (this.providerUserResponses.has(optionalField(event, 'response_id') ?? this.activeResponseId ?? '')) return
         this.sendTranscript('assistant', false, field(event, 'delta'))
         return
       case 'response.audio_transcript.done':
+        if (this.providerUserResponses.has(optionalField(event, 'response_id') ?? this.activeResponseId ?? '')) return
         this.sendTranscript('assistant', true, field(event, 'transcript'))
         return
       case 'response.done': {
         const response = event.response as Record<string, unknown> | undefined
         const responseId = typeof response?.id === 'string' ? response.id : undefined
         if (responseId !== undefined) this.suppressedResponses.delete(responseId)
+        if (responseId !== undefined) this.providerUserResponses.delete(responseId)
         this.activeResponseId = undefined
-        this.sendState('listening')
+        this.sendState(this.agentWorkPending ? 'agent-working' : 'listening')
         return
       }
       case 'transport.closed':
@@ -248,19 +284,36 @@ export class VoiceConnection {
     }
   }
 
-  private async runTool(call: VoiceToolCall) {
-    this.send({ type: 'voice.tool', serverSeq: this.nextSeq(), callId: call.callId, name: call.name, status: 'started' })
+  /** Send every semantic voice turn to the bound DSH Agent without intent classification. */
+  private async submitUserTurn(transcript: string): Promise<void> {
+    const text = transcript.trim()
+    if (text === '' || this.closed) return
+    const callId = `voice_turn_${randomUUID()}`
+    this.send({ type: 'voice.tool', serverSeq: this.nextSeq(), callId, name: 'send_to_dsh_agent', status: 'started' })
+    this.agentWorkPending = true
     this.sendState('agent-working')
-    const result = await this.tools!.execute(call)
-    this.send({
-      type: 'voice.tool',
-      serverSeq: this.nextSeq(),
-      callId: call.callId,
-      name: call.name,
-      status: result.ok ? 'completed' : 'failed',
-      message: result.ok ? 'DSH 已接受操作。' : result.output,
-    })
-    return result
+    try {
+      await this.coordinator!.submitUserTurn(text)
+      this.send({
+        type: 'voice.tool',
+        serverSeq: this.nextSeq(),
+        callId,
+        name: 'send_to_dsh_agent',
+        status: 'completed',
+        message: '已进入当前 DSH Agent 会话。',
+      })
+    } catch (error) {
+      this.agentWorkPending = false
+      this.send({
+        type: 'voice.tool',
+        serverSeq: this.nextSeq(),
+        callId,
+        name: 'send_to_dsh_agent',
+        status: 'failed',
+        message: error instanceof Error ? error.message : String(error),
+      })
+      this.sendState('listening')
+    }
   }
 
   private followDshEvents(sessionId: string): void {
@@ -270,8 +323,9 @@ export class VoiceConnection {
     void (async () => {
       for await (const item of this.ctx.apiProxy.events.host(request, abort.signal)) {
         const frame = item.payload
-        if (frame.type === 'host/session-status' && frame.sessionId === sessionId) {
-          this.send({ type: 'voice.agent-status', serverSeq: this.nextSeq(), sessionId, running: frame.running })
+        if (frame.type === 'host/session-status'
+          && (frame.sessionId === sessionId || this.coordinator?.isWorkerSession(frame.sessionId) === true)) {
+          this.send({ type: 'voice.agent-status', serverSeq: this.nextSeq(), sessionId: frame.sessionId, running: frame.running })
         }
       }
     })().catch((error: unknown) => {
@@ -281,22 +335,44 @@ export class VoiceConnection {
     void (async () => {
       for await (const item of this.ctx.apiProxy.events.mux(muxRequest, abort.signal)) {
         const frame = item.payload
-        if (frame.type !== 'session/event' || frame.sessionId !== sessionId) continue
+        if (frame.type !== 'session/event') continue
+        const isBoundSession = frame.sessionId === sessionId
+        const isWorkerSession = this.coordinator?.isWorkerSession(frame.sessionId) === true
+        if (!isBoundSession && !isWorkerSession) continue
         const event = frame.event
         if (event.type === 'assistant/message') {
           const data = event.data as Record<string, unknown>
           const turn = data.turn
           const text = assistantText(event)
-          if (typeof turn === 'number' && text !== undefined) this.pendingAssistantByTurn.set(turn, text)
+          if (typeof turn === 'number' && text !== undefined) {
+            this.pendingAssistantByTurn.set(`${frame.sessionId}:${turn}`, text)
+          }
           continue
         }
         if (event.type !== 'turn/end') continue
         const data = event.data as Record<string, unknown>
         const turn = data.turn
         if (typeof turn !== 'number') continue
-        const text = this.pendingAssistantByTurn.get(turn)
-        this.pendingAssistantByTurn.delete(turn)
+        const key = `${frame.sessionId}:${turn}`
+        const text = this.pendingAssistantByTurn.get(key)
+        this.pendingAssistantByTurn.delete(key)
         if (text === undefined) continue
+        if (isWorkerSession) {
+          this.send({
+            type: 'voice.agent-status',
+            serverSeq: this.nextSeq(),
+            sessionId: frame.sessionId,
+            running: false,
+            summary: text.slice(0, 1_200),
+          })
+          this.agentWorkPending = true
+          this.sendState('agent-working')
+          void this.coordinator?.returnWorkerResult(frame.sessionId, text).catch((error: unknown) => {
+            if (!abort.signal.aborted) this.ctx.logger.warn(`[realtime-voice] failed to return worker result: ${String(error)}`)
+          })
+          continue
+        }
+        this.agentWorkPending = false
         this.send({
           type: 'voice.agent-status',
           serverSeq: this.nextSeq(),
@@ -388,16 +464,11 @@ function normalizeRawData(raw: WebSocket.RawData): Uint8Array {
   return new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength)
 }
 
-function buildInstructions(status: { running: boolean; blank: boolean; cwd?: string; title?: string; summary?: string }): string {
+export function buildInstructions(status: { running: boolean; blank: boolean; cwd?: string; title?: string; summary?: string }): string {
   return [
-    '你是 DeepSeek Harness 的实时语音控制助理。使用自然、简短的中文对话。',
-    '你只负责听懂用户、调用允许的 DSH 工具、查询进度和播报结果；不要自己假装修改代码。',
-    '用户要求编写、修改、检查、运行或继续任何实际工作时，必须调用 start_task 或 send_task_message；绝不能只口头答应，也不要声称自己不能操作 Agent。收到工具成功结果后才能说已提交。',
-    '运行中的紧急纠偏使用 send_task_message 的 steer；非紧急后续工作使用 queue。',
-    '用户询问其他工作区、线程或会话时，先调用 list_sessions 检索；选中结果后再调用 get_session_latest_reply。不要把“当前没有运行任务”误当成“目标会话不存在”。',
-    'start_task、send_task_message、get_task_status 和 cancel_task 始终作用于本次通话绑定的当前会话；跨会话工具目前只读。',
-    '收到标记为“DSH Agent 刚完成”的系统上下文时，这是长期 DSH 会话的权威结果；简短播报并允许用户继续追问，不要把它当成新的工作指令。',
-    '取消任务前，只有在用户意思明确时才调用 cancel_task。',
+    '你是 DeepSeek Harness 的实时语音输入与播报层，不是负责回答或决策的 Agent。',
+    '用户说话时只需忠实完成转写；不要回答、建议、拒绝、调用工具或输出任何语音和文字。用户的完整转写会由宿主直接送入绑定的 DSH Agent 会话。',
+    '只有收到标记为“DSH Agent 刚完成”的系统上下文时才输出语音：忠实、简短、自然地播报其中的权威结果，不要添加新的判断，也不要再次提交任务。',
     `当前 DSH 状态：running=${String(status.running)}, blank=${String(status.blank)}.`,
     status.cwd === undefined ? '' : `当前项目目录：${status.cwd}.`,
     status.title === undefined ? '' : `当前会话标题：${status.title}.`,

@@ -45,7 +45,7 @@ describe('DashScope realtime provider', () => {
       new Config({}),
       'secret-not-logged',
       'voice instructions',
-      { onEvent: vi.fn(), onTool: vi.fn() },
+      { onEvent: vi.fn() },
       (() => {
         queueMicrotask(() => socket.event({ type: 'session.created' }))
         return socket as unknown as WebSocket
@@ -62,14 +62,13 @@ describe('DashScope realtime provider', () => {
     provider.close()
   })
 
-  it('configures the quality model and returns all tool outputs before one follow-up response', async () => {
+  it('configures the quality model as a speech-only session without provider tools', async () => {
     const socket = new FakeSocket()
-    const onTool = vi.fn(async (call) => ({ ok: true, output: JSON.stringify({ ok: true, callId: call.callId }) }))
     const provider = new DashScopeRealtime(
       config,
       'secret-not-logged',
       'voice instructions',
-      { onEvent: vi.fn(), onTool },
+      { onEvent: vi.fn() },
       ((url, options) => {
         expect(url.searchParams.get('model')).toBe('qwen-audio-3.0-realtime-plus')
         expect(options.headers?.Authorization).toBe('Bearer secret-not-logged')
@@ -81,28 +80,8 @@ describe('DashScope realtime provider', () => {
     await provider.connect()
     const update = socket.sent.find(message => message.type === 'session.update')
     expect(update).toBeDefined()
-    expect((update?.session as Record<string, unknown>).tools).toHaveLength(6)
-
-    socket.event({
-      type: 'response.function_call_arguments.done',
-      response_id: 'response-1',
-      call_id: 'call-1',
-      name: 'get_task_status',
-      arguments: '{}',
-    })
-    socket.event({
-      type: 'response.function_call_arguments.done',
-      response_id: 'response-1',
-      call_id: 'call-2',
-      name: 'send_task_message',
-      arguments: JSON.stringify({ instruction: 'continue' }),
-    })
-    socket.event({ type: 'response.done', response: { id: 'response-1' } })
-    await vi.waitFor(() => {
-      expect(socket.sent.filter(message => message.type === 'conversation.item.create')).toHaveLength(2)
-    })
-    expect(onTool).toHaveBeenCalledTimes(2)
-    expect(socket.sent.filter(message => message.type === 'response.create')).toHaveLength(1)
+    expect((update?.session as Record<string, unknown>).tools).toBeUndefined()
+    expect(JSON.stringify(update)).not.toContain('function')
     provider.close()
   })
 
@@ -112,7 +91,7 @@ describe('DashScope realtime provider', () => {
       config,
       'secret-not-logged',
       'voice instructions',
-      { onEvent: vi.fn(), onTool: vi.fn() },
+      { onEvent: vi.fn() },
       (() => {
         queueMicrotask(() => socket.event({ type: 'session.created' }))
         return socket as unknown as WebSocket
@@ -147,7 +126,6 @@ describe('DashScope realtime provider', () => {
       'voice instructions',
       {
         onEvent: () => { throw new Error('browser socket disappeared') },
-        onTool: vi.fn(),
       },
       (() => {
         queueMicrotask(() => socket.event({ type: 'session.created' }))

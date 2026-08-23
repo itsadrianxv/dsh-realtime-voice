@@ -1,15 +1,13 @@
 import WebSocket, { type ClientOptions } from 'ws';
 import type { VoiceConfig } from './config.ts';
-import type { VoiceToolCall, VoiceToolResult } from './dsh-tools.ts';
 export interface DashScopeRealtimeCallbacks {
     onEvent: (event: DashScopeServerEvent) => void;
-    onTool: (call: VoiceToolCall) => Promise<VoiceToolResult>;
 }
 export type DashScopeServerEvent = Record<string, unknown> & {
     type: string;
 };
 export type RealtimeSocketFactory = (url: URL, options: ClientOptions) => WebSocket;
-/** One upstream Qwen-Audio Realtime session with contained Function Calling. */
+/** One upstream Qwen-Audio Realtime session used only for speech I/O. */
 export declare class DashScopeRealtime {
     private readonly config;
     private readonly apiKey;
@@ -17,9 +15,8 @@ export declare class DashScopeRealtime {
     private readonly callbacks;
     private readonly socketFactory;
     private socket;
-    private readonly pendingTools;
-    private readonly queuedAgentAnnouncements;
-    private readonly announcedEventSeqs;
+    private readonly queuedAnnouncements;
+    private readonly announcedIds;
     private responseActive;
     private responseRequested;
     private inputSpeechActive;
@@ -32,9 +29,9 @@ export declare class DashScopeRealtime {
     cancelResponse(): void;
     /** Feed a completed durable DSH turn back into the short-lived voice context and speak it once. */
     announceAgentResult(text: string, eventSeq: number): void;
+    private queueAnnouncement;
     close(): void;
     private handleEvent;
-    private finishTools;
     private drainAgentAnnouncements;
     private requestResponse;
     /** A plugin callback must never be able to escape a ws EventEmitter turn and crash DSH. */

@@ -131,6 +131,6 @@ function ready(voiceSessionId: string) {
       output: { encoding: 'pcm_s16le', sampleRate: 24_000, channels: 1, frameDurationMs: 40 },
       maxBinaryFrameBytes: 65_536,
     },
-    capabilities: { bargeIn: true, functionCalling: true, reconnect: true, persistentAgentTask: true },
+    capabilities: { bargeIn: true, functionCalling: false, reconnect: true, persistentAgentTask: true },
   }
 }

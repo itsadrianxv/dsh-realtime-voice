@@ -2,10 +2,13 @@
 import type { Duplex } from 'node:stream'
 import type { IncomingMessage } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-host-apiproxy'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import type {} from '@deepseek-ai/dsh-system-prompt'
+import type {} from '@deepseek-ai/dsh-tools'
 import { WebSocketServer } from 'ws'
 import { VOICE_ROUTE } from './protocol.ts'
 import { Config, type VoiceConfig } from './host/config.ts'
@@ -16,7 +19,7 @@ export { Config }
 export type { VoiceConfig }
 
 /** Host services required before the route can be mounted. */
-export const inject = ['webServer', 'apiProxy', 'credentials']
+export const inject = ['webServer', 'apiProxy', 'credentials', 'agents', 'systemPrompt', 'tools']
 
 /** Mount one exact WebSocket route. Every accepted connection is owned by this plugin fiber. */
 export function apply(ctx: Context, config: VoiceConfig): void {
