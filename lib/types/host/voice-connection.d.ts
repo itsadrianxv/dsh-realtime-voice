@@ -24,6 +24,9 @@ export declare class VoiceConnection {
     private session;
     private coordinator;
     private activeResponseId;
+    /** Mini Program RecorderManager has no iOS native AEC. During downlink audio,
+     * only an explicit, locally verified barge-in control re-opens upstream PCM. */
+    private suppressMiniInputAudio;
     private readonly suppressedResponses;
     private readonly handledFunctionCalls;
     private latestUserTranscript;

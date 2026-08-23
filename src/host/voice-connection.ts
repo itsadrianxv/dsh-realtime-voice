@@ -47,6 +47,9 @@ export class VoiceConnection {
   private session: DshVoiceSession | undefined
   private coordinator: DshVoiceCoordinator | undefined
   private activeResponseId: string | undefined
+  /** Mini Program RecorderManager has no iOS native AEC. During downlink audio,
+   * only an explicit, locally verified barge-in control re-opens upstream PCM. */
+  private suppressMiniInputAudio = false
   private readonly suppressedResponses = new Set<string>()
   private readonly handledFunctionCalls = new Set<string>()
   private latestUserTranscript = ''
@@ -123,6 +126,7 @@ export class VoiceConnection {
         throw new Error(`input audio sequence gap: expected ${this.nextInputSequence}, received ${frame.sequence}`)
       }
       this.nextInputSequence += 1
+      if (this.suppressMiniInputAudio) return
       this.provider.appendAudio(frame.payload)
       return
     }
@@ -138,6 +142,7 @@ export class VoiceConnection {
         this.dispose('client-ended')
         return
       case 'voice.cancel-response':
+        this.suppressMiniInputAudio = false
         this.interruptActiveResponse('cancelled', true)
         return
       case 'voice.commit':
@@ -225,6 +230,7 @@ export class VoiceConnection {
     if (this.closed) return
     switch (event.type) {
       case 'input_audio_buffer.speech_started':
+        this.suppressMiniInputAudio = false
         // Qwen has already detected this turn and automatically cancels the
         // active response. Only suppress/clear here; a second response.cancel
         // would race and can yield "Conversation has no active response".
@@ -257,6 +263,7 @@ export class VoiceConnection {
         void this.handleFunctionCall(event)
         return
       case 'response.audio.delta': {
+        if (this.hello?.client.platform === 'wechat-mini-program') this.suppressMiniInputAudio = true
         const responseId = optionalField(event, 'response_id')
         const effectiveResponseId = responseId ?? this.activeResponseId
         if (effectiveResponseId !== undefined && this.suppressedResponses.has(effectiveResponseId)) return
@@ -288,6 +295,7 @@ export class VoiceConnection {
         this.sendTranscript('assistant', true, field(event, 'transcript'))
         return
       case 'response.done': {
+        this.suppressMiniInputAudio = false
         const response = event.response as Record<string, unknown> | undefined
         const responseId = typeof response?.id === 'string' ? response.id : undefined
         if (responseId !== undefined) this.suppressedResponses.delete(responseId)
