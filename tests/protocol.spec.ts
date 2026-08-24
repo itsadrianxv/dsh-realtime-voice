@@ -64,6 +64,8 @@ describe('voice wire protocol', () => {
     expect(() => decodeAudioFrame(encoded)).toThrow(/flags/)
     expect(isVoiceClientControl({ type: 'voice.ping', sentAt: Number.NaN })).toBe(false)
     expect(isVoiceClientControl({ type: 'voice.end', reason: { nope: true } })).toBe(false)
+    expect(isVoiceClientControl({ type: 'voice.playback-drained', streamId: 7 })).toBe(true)
+    expect(isVoiceClientControl({ type: 'voice.playback-drained', streamId: -1 })).toBe(false)
   })
 
   it('accepts approval and structured-question answers but rejects malformed payloads', () => {

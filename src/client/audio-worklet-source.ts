@@ -43,12 +43,18 @@ class DshVoicePlayback extends AudioWorkletProcessor {
     this.queue = []
     this.offset = 0
     this.epoch = 0
+    this.drainEpoch = undefined
     this.port.onmessage = (event) => {
       const message = event.data
       if (message.type === 'clear') {
         this.queue = []
         this.offset = 0
         this.epoch = message.epoch
+        this.drainEpoch = undefined
+        return
+      }
+      if (message.type === 'finalize') {
+        if (message.epoch >= this.epoch) this.drainEpoch = message.epoch
         return
       }
       if (message.type !== 'audio' || message.epoch < this.epoch) return
@@ -56,6 +62,7 @@ class DshVoicePlayback extends AudioWorkletProcessor {
         this.queue = []
         this.offset = 0
         this.epoch = message.epoch
+        this.drainEpoch = undefined
       }
       const source = new Int16Array(message.pcm)
       const ratio = this.sourceRate / sampleRate
@@ -86,6 +93,10 @@ class DshVoicePlayback extends AudioWorkletProcessor {
         this.queue.shift()
         this.offset = 0
       }
+    }
+    if (this.queue.length === 0 && this.drainEpoch === this.epoch) {
+      this.port.postMessage({ type: 'drained', epoch: this.epoch })
+      this.drainEpoch = undefined
     }
     return true
   }

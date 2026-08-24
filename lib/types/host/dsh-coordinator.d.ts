@@ -1,12 +1,14 @@
 import type { Context } from '@deepseek-ai/cordis';
 export interface HandoffRecord {
     handoffId: string;
+    promptRpcId: string;
     sessionId: string;
     mode: 'queue' | 'steer';
     request: string;
     spokenInput: string;
     status: 'accepted' | 'running' | 'needs-input' | 'completed' | 'cancelled' | 'failed';
     turn?: number;
+    queueItemId?: string;
     createdAt: number;
 }
 export interface PendingVoiceApproval {
@@ -43,6 +45,8 @@ export interface DshVoiceCoordinatorState {
     handoffs: Map<string, HandoffRecord>;
     pendingApprovals: Map<string, PendingVoiceApproval>;
     pendingQuestions: Map<string, PendingVoiceQuestion>;
+    pendingTurnBindings: Set<string>;
+    activeTurn?: number;
 }
 export declare function createDshVoiceCoordinatorState(): DshVoiceCoordinatorState;
 /**
@@ -56,17 +60,26 @@ export declare class DshVoiceCoordinator {
     private readonly handoffs;
     private readonly pendingApprovals;
     private readonly pendingQuestions;
+    private readonly state;
     constructor(ctx: Context, sessionId: string, state?: DshVoiceCoordinatorState);
     /** Start work when idle, or steer the active turn when DSH is already busy. */
     handoff(request: string, spokenInput: string): Promise<HandoffRecord>;
     /** Cancel the authoritative bound DSH turn; there is no shadow worker. */
     cancel(reason?: string): Promise<{
         sessionId: string;
-        status: 'cancelled';
+        status: 'cancellation-requested';
+        accepted: true;
     }>;
+    /** Capture the transient inbox identity so cancellation removes only work owned by this voice call. */
+    observeQueue(items: readonly unknown[]): void;
     markTurnStarted(turn: number): void;
+    /** Bind a handoff only after its durable user/message echoes the prompt rpcId. */
+    observeUserMessage(promptRpcId: string): void;
+    /** Events after user/message carry the turn number needed to finish binding. */
+    observeTurnEvent(turn: number): void;
     markNeedsInput(): void;
-    markTurnEnded(turn: number, reason: string): void;
+    markTurnEnded(turn: number, reason: string): HandoffRecord[];
+    markFailed(): void;
     rememberApproval(approval: PendingVoiceApproval): void;
     forgetApproval(approvalId: string): void;
     listPendingApprovals(): PendingVoiceApproval[];

@@ -35,6 +35,7 @@ export class DashScopeRealtime {
   private responseRequested = false
   private followupResponsePending = false
   private inputSpeechActive = false
+  private automaticTurnPending = false
   private closed = false
 
   constructor(
@@ -181,6 +182,7 @@ export class DashScopeRealtime {
     this.emitEvent(event)
     if (event.type === 'input_audio_buffer.speech_started') {
       this.inputSpeechActive = true
+      this.automaticTurnPending = true
       return
     }
     if (event.type === 'input_audio_buffer.speech_stopped') {
@@ -190,12 +192,14 @@ export class DashScopeRealtime {
     if (event.type === 'response.created') {
       this.responseActive = true
       this.responseRequested = false
+      if (this.automaticTurnPending && !this.inputSpeechActive) this.automaticTurnPending = false
       return
     }
     if (event.type !== 'response.done') return
     this.responseActive = false
     this.responseRequested = false
     if (this.followupResponsePending) {
+      if (this.inputSpeechActive || this.automaticTurnPending) return
       this.followupResponsePending = false
       this.requestResponse()
       return
@@ -206,6 +210,7 @@ export class DashScopeRealtime {
   private drainAgentAnnouncements(): void {
     if (this.closed
       || this.inputSpeechActive
+      || this.automaticTurnPending
       || this.responseActive
       || this.responseRequested
       || this.queuedAnnouncements.length === 0) return
@@ -226,7 +231,7 @@ export class DashScopeRealtime {
   }
 
   private requestResponse(): void {
-    if (this.closed || this.responseActive || this.responseRequested) {
+    if (this.closed || this.responseActive || this.responseRequested || this.inputSpeechActive || this.automaticTurnPending) {
       this.followupResponsePending = true
       return
     }

@@ -1,9 +1,10 @@
 import type { IncomingMessage } from 'node:http';
 import type { Context } from '@deepseek-ai/cordis';
 import type WebSocket from 'ws';
+import { type VoiceHello, type VoiceReady } from '../protocol.ts';
 import type { VoiceConfig } from './config.ts';
 import { VoiceRuntime, type VoiceContinuityState } from './voice-runtime.ts';
-/** One browser or Mini Program call, pinned to one DSH session for its full lifetime. */
+/** One client-neutral voice call, pinned to one DSH session for its full lifetime. */
 export declare class VoiceConnection {
     private readonly ctx;
     private readonly socket;
@@ -24,13 +25,20 @@ export declare class VoiceConnection {
     private session;
     private coordinator;
     private activeResponseId;
-    /** Mini Program RecorderManager has no iOS native AEC. During downlink audio,
-     * only an explicit, locally verified barge-in control re-opens upstream PCM. */
-    private suppressMiniInputAudio;
+    /** Non-full-duplex clients gate upstream PCM during downlink playback. An
+     * explicit barge-in or negotiated local playback drain re-opens it. */
+    private suppressInputDuringPlayback;
+    private gatedOutputStreamId;
+    private readonly responseStreams;
+    private readonly responseAudioDurationMs;
+    private readonly responseAudioStartedAt;
+    private playbackDrainFallbackTimer;
     private readonly suppressedResponses;
     private readonly handledFunctionCalls;
     private latestUserTranscript;
     private agentWorkPending;
+    private dshTurnRunning;
+    private activeDshJobs;
     private closed;
     private ready;
     private leaseAcquired;
@@ -46,20 +54,38 @@ export declare class VoiceConnection {
     /** Execute only the small semantic bridge vocabulary exposed to Qwen. */
     private handleFunctionCall;
     private followDshEvents;
+    /**
+     * Fold durable history after the live mux subscription is open. This closes
+     * the provider-connect/reconnect gap without replaying already-terminal
+     * handoffs: coordinator transitions are idempotent and scoped by prompt rpcId.
+     */
+    private reconcileDshHistory;
     private answerApproval;
     private answerQuestion;
     private sendApproval;
     private sendQuestion;
     private clearPlayback;
+    private shouldGateInputDuringPlayback;
+    /**
+     * Older V1 clients do not send playback-drained. Estimate the
+     * remaining local queue from delivered PCM and release with a safety margin,
+     * so compatibility mode can reduce echo without ever permanently muting mic.
+     */
+    private schedulePlaybackFallback;
+    private releasePlaybackGate;
     /** Stop one response exactly once, even when local and provider VAD race. */
     private interruptActiveResponse;
     private sendTranscript;
     private sendState;
+    private refreshAgentWorkPending;
     private fail;
     private send;
     private nextSeq;
+    private persistOutputCursor;
     private rpcId;
 }
+/** Deterministic, platform-neutral hello → ready capability negotiation. */
+export declare function negotiateVoiceCapabilities(hello: VoiceHello): VoiceReady['capabilities'];
 export declare function buildInstructions(status: {
     running: boolean;
     blank: boolean;

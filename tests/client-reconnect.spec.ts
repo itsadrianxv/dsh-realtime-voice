@@ -76,7 +76,7 @@ describe('browser voice reconnect', () => {
     const firstConnect = connect('session-test')
     const first = FakeBrowserSocket.instances[0]!
     first.open()
-    first.message(ready('voice-one'))
+    first.message(ready('voice-one', 1))
     await firstConnect
     expect(controller.getSnapshot().voiceSessionId).toBe('voice-one')
 
@@ -85,13 +85,13 @@ describe('browser voice reconnect', () => {
     await vi.advanceTimersByTimeAsync(1_000)
     const second = FakeBrowserSocket.instances[1]!
     second.open()
-    second.message(ready('voice-two'))
+    second.message(ready('voice-one', 2))
     await vi.runAllTicks()
-    expect(controller.getSnapshot()).toMatchObject({ phase: 'listening', voiceSessionId: 'voice-two' })
+    expect(controller.getSnapshot()).toMatchObject({ phase: 'listening', voiceSessionId: 'voice-one' })
 
     // A delayed duplicate close from socket one must not mark socket two dead.
     first.drop(1006, 'late-old-close')
-    expect(controller.getSnapshot()).toMatchObject({ phase: 'listening', voiceSessionId: 'voice-two' })
+    expect(controller.getSnapshot()).toMatchObject({ phase: 'listening', voiceSessionId: 'voice-one' })
     await controller.dispose()
   })
 
@@ -118,12 +118,12 @@ describe('browser voice reconnect', () => {
   })
 })
 
-function ready(voiceSessionId: string) {
+function ready(voiceSessionId: string, serverSeq: number) {
   return {
     type: 'voice.ready',
     protocol: VOICE_PROTOCOL,
     voiceSessionId,
-    serverSeq: 1,
+    serverSeq,
     target: { sessionId: 'session-test', running: false },
     provider: { id: 'dashscope', model: 'test', voice: 'test', turnDetection: 'server_vad' },
     audio: {
@@ -131,6 +131,12 @@ function ready(voiceSessionId: string) {
       output: { encoding: 'pcm_s16le', sampleRate: 24_000, channels: 1, frameDurationMs: 40 },
       maxBinaryFrameBytes: 65_536,
     },
-    capabilities: { bargeIn: true, functionCalling: false, reconnect: true, persistentAgentTask: true },
+    capabilities: {
+      bargeIn: true,
+      functionCalling: false,
+      reconnect: true,
+      persistentAgentTask: true,
+      playbackDrainAck: true,
+    },
   }
 }

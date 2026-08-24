@@ -2,7 +2,7 @@
 
 DeepSeek Harness 官方插件形态的实时语音 Agent：安装后在 WebUI 输入框旁出现拨打按钮，用户可持续对话、打断播报、询问进度，并用语音启动、追加、纠正或停止当前 DSH Agent 工作。
 
-当前研究版本：`0.1.0-alpha.9-research.1`，目标 DSH：`0.1.0-rc.7`。该版本位于独立研究分支，不替换已发布的 `alpha.8`。
+当前研究版本：`0.1.0-alpha.9-research.2`，目标 DSH：`0.1.0-rc.7`。该版本位于独立研究分支，不替换已发布的 `alpha.8`。
 
 本包同时声明 DSH bundle、Host 插件和“原生 WebUI 浏览器侧”插件。这里不是另做一个网站：UI 直接注入 DSH 自带的 `http://127.0.0.1:3080`，不新增页面或 UI 端口。它不修改 DSH 源码，不另起后台进程；卸载或禁用时会移除 UI/路由并关闭麦克风、音频、浏览器 WebSocket 和百炼连接，已经交给 DSH 的任务继续运行。
 
@@ -18,10 +18,10 @@ DeepSeek Harness 官方插件形态的实时语音 Agent：安装后在 WebUI �
 - DSH 是唯一执行面：任务直接进入拨号时绑定的原会话；空闲时 `queue`，工作中补充或纠正自动 `steer`，不创建影子语音 Agent 或后台 worker
 - 进度与终态闭环：DSH 的阶段消息、`turn/end` 结果、错误和取消状态回灌实时会话；只有权威终态才会被播报为“已完成”
 - 审批与追问闭环：订阅 DSH 原生 `approval/requested`、`question/requested`，用户可直接口头回答，也可在悬浮窗审批卡/选项卡确认，结果通过原始 RPC 回到同一任务
-- 长通话恢复：隔离上游/浏览器 socket 异常、忽略迟到旧连接事件、重置音频流，并针对百炼 `1007` 限流延长退避；十分钟内重连会恢复同一 voiceSessionId、最近对话边缘状态和待处理审批/追问
+- 长通话恢复：异常断线为 owner 保留 30 秒原子恢复租约，控制序号、音频 stream/sequence/PTS 跨 transport 单调延续；WebUI 定时心跳并针对百炼 `1007` 限流延长退避，DSH 中已开始的任务始终继续运行
 - DSH credentials 解析 `DASHSCOPE_API_KEY`，密钥不进入浏览器包
-- `dsh.voice.v1` 二进制协议，WebUI 与微信小程序共用底层契约
-- DSH Host 权威单通话租约：WebUI/微信同时拨号时仅首个客户端成功，其他端显示占用来源；UI 不能绕过 Host 仲裁
+- `dsh.voice.v1` 客户端无关协议：WebUI 与微信小程序共用 hello/ready、播放排空 ACK、24 字节二进制帧、16/24 kHz PCM、打断和恢复契约
+- DSH Host 权威单通话租约：status 只提供非秘密元数据，恢复 token 仅由 owning socket 获得；WebUI/微信同时拨号时只有 Host 原子仲裁的客户端成功
 
 运行时为双平面：Qwen Audio Realtime 是低延迟会话面，负责听、说、自然问答、VAD 打断和判断是否需要真实执行；DSH 当前会话选择的 DeepSeek/千问等 Agent 模型是执行面，负责工具、项目上下文和持续 Agent 工作。两者通过 4 个窄语义 Function Call（交接、取消、审批、追问回答）及 DSH 权威事件合成一个助手体验。
 
@@ -80,8 +80,9 @@ dsh plugin --profile web remove @harness-remote/dsh-realtime-voice
 - Qwen Function Calling → 绑定 DSH 会话 `queue/steer` → DSH 权威事件 → Qwen 主动播报的语义执行回环
 - 真实 `ws` 成功回调兼容：首个下行音频包不会被误判为发送失败；助手流式字幕按增量完整拼接
 - 本地起音约 80ms 后先清空播放，Host 对同一响应只取消一次；VAD 云端事件继续作为权威兜底
+- WebUI 与微信同能力下采用相同播放仲裁：本地播放队列排空后 ACK；旧客户端或 ACK 丢失按已发送 PCM 时长有界兜底，不会永久封麦
 - 悬浮窗口拖拽坐标自动限制在视口内，窗口缩放与展开/收起时不会丢出屏幕
 - 插件增删前后 28 个现有会话及最新会话 ID 保持一致
-- 协议、DSH 会话绑定、语义 Function Calling、审批/追问响应、断线续接与 Host 生命周期自动化测试
+- 协议能力协商、DSH 会话绑定、语义 Function Calling、审批/追问校验、播放排空、打断竞态、断线续接、占用仲裁与 Host 生命周期自动化测试
 
 真实麦克风环境音与听感仍需人工验收；自动测试不会擅自采集或上传环境音。

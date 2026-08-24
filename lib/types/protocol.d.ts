@@ -3,6 +3,7 @@ export declare const VOICE_PROTOCOL: "dsh.voice.v1";
 export declare const VOICE_PROTOCOL_VERSION: 1;
 export declare const VOICE_ROUTE: "/plugins/realtime-voice/v1";
 export declare const VOICE_STATUS_ROUTE: "/plugins/realtime-voice/v1/status";
+export declare const VOICE_WEB_CLIENT_VERSION: "0.1.0-alpha.9-research.2";
 export declare const INPUT_SAMPLE_RATE: 16000;
 export declare const OUTPUT_SAMPLE_RATE: 24000;
 export declare const AUDIO_CHANNELS: 1;
@@ -24,10 +25,12 @@ export interface VoiceHello {
         version: string;
         binaryWebSocket: true;
         playbackClear: true;
-        /** Mini Program clients must only set this after a real-device PCM layout probe. */
+        /** Native clients must only set this after a real-device PCM layout probe. */
         pcmS16leVerified: true;
         foregroundOnly: boolean;
         duplex: 'full' | 'best-effort' | 'turn-based';
+        /** Whether this transport can ACK after its actual local player queue drains. */
+        playbackDrainAck?: boolean;
     };
     target: {
         sessionId: string;
@@ -74,6 +77,9 @@ export type VoiceClientControl = VoiceHello | {
 } | {
     type: 'voice.cancel-response';
 } | {
+    type: 'voice.playback-drained';
+    streamId: number;
+} | {
     type: 'voice.commit';
 } | {
     type: 'voice.approval-answer';
@@ -108,17 +114,17 @@ export interface VoiceReady {
         maxBinaryFrameBytes: number;
     };
     capabilities: {
-        bargeIn: true;
+        bargeIn: boolean;
         functionCalling: boolean;
         reconnect: true;
         persistentAgentTask: true;
+        playbackDrainAck: boolean;
     };
 }
 export interface VoiceOccupancyOwner {
     platform: VoiceClientPlatform;
     clientVersion: string;
     sessionId: string;
-    voiceSessionId: string;
     startedAt: number;
     lastSeenAt: number;
 }
@@ -147,6 +153,11 @@ export type VoiceServerControl = VoiceReady | {
     serverSeq: number;
     streamId: number;
     reason: 'barge-in' | 'cancelled';
+} | {
+    type: 'voice.playback-finalize';
+    serverSeq: number;
+    streamId: number;
+    lastSequence: number;
 } | {
     type: 'voice.agent-status';
     serverSeq: number;

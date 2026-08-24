@@ -35,6 +35,11 @@ export declare class VoiceCallController implements HostObservable<VoiceSnapshot
     private lastReconnectError;
     private ending;
     private presenceTimer;
+    private heartbeatTimer;
+    private startEpoch;
+    private presenceRequestSeq;
+    private lastServerSeq;
+    private lastOutputStreamId;
     getSnapshot: () => VoiceSnapshot;
     subscribe: (listener: () => void) => (() => void);
     startPresence(): void;
@@ -56,5 +61,7 @@ export declare class VoiceCallController implements HostObservable<VoiceSnapshot
     private fail;
     private cleanup;
     private refreshPresence;
+    private startHeartbeat;
+    private resetCallCursors;
     private update;
 }

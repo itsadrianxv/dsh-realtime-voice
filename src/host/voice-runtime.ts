@@ -6,10 +6,15 @@ import { VOICE_PROTOCOL, type VoiceClientPlatform, type VoiceOccupancyStatus } f
 export interface VoiceContinuityState {
   id: string
   sessionId: string
+  platform: VoiceClientPlatform
   createdAt: number
   lastSeenAt: number
   userTranscript: string
   assistantTranscript: string
+  serverSeq: number
+  outputStreamId: number
+  outputSequence: number
+  outputPtsMs: number
   coordinator: DshVoiceCoordinatorState
   pendingApproval?: PendingVoiceApproval
   pendingQuestion?: PendingVoiceQuestion
@@ -32,12 +37,14 @@ interface ActiveVoiceLease {
   voiceSessionId: string
   startedAt: number
   lastSeenAt: number
+  connected: boolean
+  disconnectedAt?: number
   revoke: () => void
 }
 
 export type VoiceLeaseResult =
   | { ok: true; state: VoiceContinuityState; resumed: boolean }
-  | { ok: false; occupancy: VoiceOccupancyStatus }
+  | { ok: false; reason: 'busy' | 'invalid-resume'; occupancy: VoiceOccupancyStatus }
 
 /**
  * Short-lived continuity ledger for transport reconnects. DSH remains the
@@ -48,19 +55,29 @@ export class VoiceRuntime {
   private readonly calls = new Map<string, VoiceContinuityState>()
   private activeLease: ActiveVoiceLease | undefined
 
-  constructor(private readonly retentionMs = 10 * 60_000) {}
+  constructor(
+    private readonly retentionMs = 10 * 60_000,
+    private readonly reconnectGraceMs = 30_000,
+    private readonly heartbeatTimeoutMs = 45_000,
+  ) {}
 
   acquireLease(request: VoiceLeaseRequest): VoiceLeaseResult {
     this.sweep()
     const active = this.activeLease
     const mayResume = active !== undefined
+      && !active.connected
       && request.resumeId === active.voiceSessionId
       && request.sessionId === active.sessionId
+      && request.platform === active.platform
     if (active !== undefined && !mayResume) {
-      return { ok: false, occupancy: this.occupancy() }
+      return { ok: false, reason: 'busy', occupancy: this.occupancy() }
     }
 
     const resumed = request.resumeId === undefined ? undefined : this.calls.get(request.resumeId)
+    if (request.resumeId !== undefined
+      && (resumed === undefined || resumed.sessionId !== request.sessionId || resumed.platform !== request.platform)) {
+      return { ok: false, reason: 'invalid-resume', occupancy: this.occupancy() }
+    }
     let state: VoiceContinuityState
     if (resumed !== undefined && resumed.sessionId === request.sessionId) {
       resumed.lastSeenAt = Date.now()
@@ -70,10 +87,15 @@ export class VoiceRuntime {
       state = {
         id: randomUUID(),
         sessionId: request.sessionId,
+        platform: request.platform,
         createdAt: now,
         lastSeenAt: now,
         userTranscript: '',
         assistantTranscript: '',
+        serverSeq: 0,
+        outputStreamId: 1,
+        outputSequence: 0,
+        outputPtsMs: 0,
         coordinator: createDshVoiceCoordinatorState(),
       }
       this.calls.set(state.id, state)
@@ -89,6 +111,7 @@ export class VoiceRuntime {
       voiceSessionId: state.id,
       startedAt,
       lastSeenAt: Date.now(),
+      connected: true,
       revoke: request.revoke,
     }
     // Publish the replacement before revoking the stale transport. Its close
@@ -102,11 +125,21 @@ export class VoiceRuntime {
     if (this.activeLease?.voiceSessionId === state.id) this.activeLease.lastSeenAt = state.lastSeenAt
   }
 
-  release(connectionId: string): void {
-    if (this.activeLease?.connectionId === connectionId) this.activeLease = undefined
+  release(connectionId: string, retainForResume = false): void {
+    const lease = this.activeLease
+    if (lease?.connectionId !== connectionId) return
+    if (!retainForResume) {
+      this.activeLease = undefined
+      this.calls.delete(lease.voiceSessionId)
+      return
+    }
+    lease.connected = false
+    lease.disconnectedAt = Date.now()
+    lease.lastSeenAt = lease.disconnectedAt
   }
 
   occupancy(): VoiceOccupancyStatus {
+    this.sweep()
     const lease = this.activeLease
     if (lease === undefined) return { protocol: VOICE_PROTOCOL, active: false }
     return {
@@ -116,7 +149,6 @@ export class VoiceRuntime {
         platform: lease.platform,
         clientVersion: lease.clientVersion,
         sessionId: lease.sessionId,
-        voiceSessionId: lease.voiceSessionId,
         startedAt: lease.startedAt,
         lastSeenAt: lease.lastSeenAt,
       },
@@ -130,7 +162,19 @@ export class VoiceRuntime {
   }
 
   private sweep(): void {
-    const expiredBefore = Date.now() - this.retentionMs
+    const now = Date.now()
+    const lease = this.activeLease
+    if (lease !== undefined) {
+      const disconnectedExpired = !lease.connected
+        && lease.disconnectedAt !== undefined
+        && lease.disconnectedAt < now - this.reconnectGraceMs
+      const heartbeatExpired = lease.connected && lease.lastSeenAt < now - this.heartbeatTimeoutMs
+      if (disconnectedExpired || heartbeatExpired) {
+        this.activeLease = undefined
+        lease.revoke()
+      }
+    }
+    const expiredBefore = now - this.retentionMs
     for (const [id, state] of this.calls) {
       if (id !== this.activeLease?.voiceSessionId && state.lastSeenAt < expiredBefore) this.calls.delete(id)
     }

@@ -147,6 +147,23 @@ describe('DashScope realtime provider', () => {
     provider.close()
   })
 
+  it('does not create a follow-up response inside an active smart-turn speech window', async () => {
+    const socket = new FakeSocket()
+    const provider = createProvider(socket)
+    await provider.connect()
+    socket.event({ type: 'response.created', response: { id: 'old-response' } })
+    provider.completeFunctionCall('call-1', { status: 'accepted' })
+    socket.event({ type: 'input_audio_buffer.speech_started' })
+    socket.event({ type: 'response.done', response: { id: 'old-response', status: 'cancelled' } })
+    expect(socket.sent.filter(message => message.type === 'response.create')).toHaveLength(0)
+
+    socket.event({ type: 'input_audio_buffer.speech_stopped' })
+    socket.event({ type: 'response.created', response: { id: 'automatic-turn-response' } })
+    socket.event({ type: 'response.done', response: { id: 'automatic-turn-response' } })
+    expect(socket.sent.filter(message => message.type === 'response.create')).toHaveLength(1)
+    provider.close()
+  })
+
   it('contains browser callback faults inside one provider event turn', async () => {
     const socket = new FakeSocket()
     const provider = createProvider(socket, config, () => { throw new Error('browser socket disappeared') })

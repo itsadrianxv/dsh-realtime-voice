@@ -34,6 +34,7 @@ export declare class DashScopeRealtime {
     private responseRequested;
     private followupResponsePending;
     private inputSpeechActive;
+    private automaticTurnPending;
     private closed;
     constructor(config: VoiceConfig, apiKey: string, instructions: string, tools: readonly RealtimeFunctionTool[], callbacks: DashScopeRealtimeCallbacks, socketFactory?: RealtimeSocketFactory);
     /** Connect and resolve only after the upstream session accepts its configuration. */

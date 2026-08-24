@@ -3,6 +3,7 @@ import type { IncomingMessage } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { RpcId } from '@deepseek-ai/dsh-host-apiproxy'
+import { SessionId } from '@deepseek-ai/dsh-session/types'
 import type WebSocket from 'ws'
 import {
   AUDIO_CHANNELS,
@@ -14,6 +15,7 @@ import {
   OUTPUT_SAMPLE_RATE,
   VOICE_PROTOCOL,
   type VoiceHello,
+  type VoiceReady,
   type VoiceServerControl,
 } from '../protocol.ts'
 import type { VoiceConfig } from './config.ts'
@@ -32,7 +34,7 @@ import { assistantText, DshVoiceSession } from './dsh-session-state.ts'
 import { isWebSocketSendError } from './websocket-send.ts'
 import { VoiceRuntime, type VoiceContinuityState } from './voice-runtime.ts'
 
-/** One browser or Mini Program call, pinned to one DSH session for its full lifetime. */
+/** One client-neutral voice call, pinned to one DSH session for its full lifetime. */
 export class VoiceConnection {
   private readonly provisionalId = randomUUID()
   private continuity: VoiceContinuityState | undefined
@@ -47,13 +49,20 @@ export class VoiceConnection {
   private session: DshVoiceSession | undefined
   private coordinator: DshVoiceCoordinator | undefined
   private activeResponseId: string | undefined
-  /** Mini Program RecorderManager has no iOS native AEC. During downlink audio,
-   * only an explicit, locally verified barge-in control re-opens upstream PCM. */
-  private suppressMiniInputAudio = false
+  /** Non-full-duplex clients gate upstream PCM during downlink playback. An
+   * explicit barge-in or negotiated local playback drain re-opens it. */
+  private suppressInputDuringPlayback = false
+  private gatedOutputStreamId: number | undefined
+  private readonly responseStreams = new Map<string, number>()
+  private readonly responseAudioDurationMs = new Map<string, number>()
+  private readonly responseAudioStartedAt = new Map<string, number>()
+  private playbackDrainFallbackTimer: ReturnType<typeof setTimeout> | undefined
   private readonly suppressedResponses = new Set<string>()
   private readonly handledFunctionCalls = new Set<string>()
   private latestUserTranscript = ''
   private agentWorkPending = false
+  private dshTurnRunning = false
+  private activeDshJobs = 0
   private closed = false
   private ready = false
   private leaseAcquired = false
@@ -91,13 +100,14 @@ export class VoiceConnection {
     if (this.closed) return
     this.closed = true
     clearTimeout(this.helloTimer)
+    if (this.playbackDrainFallbackTimer !== undefined) clearTimeout(this.playbackDrainFallbackTimer)
     this.hostEventsAbort?.abort()
     this.coordinator = undefined
     this.provider?.close()
     this.provider = undefined
     if (this.leaseAcquired) {
       this.leaseAcquired = false
-      this.runtime.release(this.provisionalId)
+      this.runtime.release(this.provisionalId, isTransientDisconnect(reason))
     }
     if (this.socket.readyState === this.socket.OPEN || this.socket.readyState === this.socket.CONNECTING) {
       this.socket.close(1001, reason)
@@ -126,7 +136,7 @@ export class VoiceConnection {
         throw new Error(`input audio sequence gap: expected ${this.nextInputSequence}, received ${frame.sequence}`)
       }
       this.nextInputSequence += 1
-      if (this.suppressMiniInputAudio) return
+      if (this.suppressInputDuringPlayback) return
       this.provider.appendAudio(frame.payload)
       return
     }
@@ -142,8 +152,12 @@ export class VoiceConnection {
         this.dispose('client-ended')
         return
       case 'voice.cancel-response':
-        this.suppressMiniInputAudio = false
         this.interruptActiveResponse('cancelled', true)
+        return
+      case 'voice.playback-drained':
+        if (this.hello?.client.playbackDrainAck === true && parsed.streamId === this.gatedOutputStreamId) {
+          this.releasePlaybackGate()
+        }
         return
       case 'voice.commit':
         this.provider?.commitAudio()
@@ -174,14 +188,27 @@ export class VoiceConnection {
       revoke: () => this.dispose('voice-resumed-elsewhere'),
     })
     if (!lease.ok) {
-      this.send({ type: 'voice.busy', serverSeq: this.nextSeq(), occupancy: lease.occupancy })
-      this.dispose('voice-busy')
+      if (lease.reason === 'busy') {
+        this.send({ type: 'voice.busy', serverSeq: this.nextSeq(), occupancy: lease.occupancy })
+        this.dispose('voice-busy')
+      } else {
+        this.fail('resume-rejected', '语音恢复凭证无效，或与原客户端、DSH 会话不匹配。', false)
+      }
       return
     }
     this.leaseAcquired = true
     this.continuity = lease.state
+    if (hello.resume !== undefined && hello.resume.lastServerSeq > lease.state.serverSeq) {
+      this.fail('resume-sequence-invalid', '客户端语音恢复序号超出 Host 权威水位。', false)
+      return
+    }
+    this.serverSeq = lease.state.serverSeq
+    this.outputStreamId = lease.state.outputStreamId
+    this.outputSeq = lease.state.outputSequence
+    this.outputPtsMs = lease.state.outputPtsMs
     this.session = new DshVoiceSession(this.ctx, hello.target.sessionId)
     const status = await this.session.snapshot()
+    this.dshTurnRunning = status.running
     const coordinator = new DshVoiceCoordinator(this.ctx, hello.target.sessionId, this.continuity.coordinator)
     this.coordinator = coordinator
     const credential = await this.ctx.credentials.resolve(credentialRef(this.config.apiKeyEnv))
@@ -206,7 +233,7 @@ export class VoiceConnection {
       protocol: VOICE_PROTOCOL,
       voiceSessionId: this.id,
       serverSeq: this.nextSeq(),
-      target: { sessionId: hello.target.sessionId, running: status.running },
+      target: { sessionId: hello.target.sessionId, running: status.running || coordinator.active },
       provider: {
         id: 'dashscope',
         model: this.config.model,
@@ -218,19 +245,20 @@ export class VoiceConnection {
         output: { encoding: 'pcm_s16le', sampleRate: OUTPUT_SAMPLE_RATE, channels: AUDIO_CHANNELS, frameDurationMs: 40 },
         maxBinaryFrameBytes: this.config.maxBinaryFrameBytes,
       },
-      capabilities: { bargeIn: true, functionCalling: true, reconnect: true, persistentAgentTask: true },
+      capabilities: negotiateVoiceCapabilities(hello),
     })
     this.sendState('listening')
     if (this.continuity.pendingApproval !== undefined) this.sendApproval(this.continuity.pendingApproval, 'pending')
     if (this.continuity.pendingQuestion !== undefined) this.sendQuestion(this.continuity.pendingQuestion, 'pending')
     this.followDshEvents(hello.target.sessionId)
+    await this.reconcileDshHistory(hello.target.sessionId)
   }
 
   private onProviderEvent(event: DashScopeServerEvent): void {
     if (this.closed) return
     switch (event.type) {
       case 'input_audio_buffer.speech_started':
-        this.suppressMiniInputAudio = false
+        this.suppressInputDuringPlayback = false
         // Qwen has already detected this turn and automatically cancels the
         // active response. Only suppress/clear here; a second response.cancel
         // would race and can yield "Conversation has no active response".
@@ -263,11 +291,23 @@ export class VoiceConnection {
         void this.handleFunctionCall(event)
         return
       case 'response.audio.delta': {
-        if (this.hello?.client.platform === 'wechat-mini-program') this.suppressMiniInputAudio = true
         const responseId = optionalField(event, 'response_id')
         const effectiveResponseId = responseId ?? this.activeResponseId
         if (effectiveResponseId !== undefined && this.suppressedResponses.has(effectiveResponseId)) return
+        if (effectiveResponseId !== undefined) this.responseStreams.set(effectiveResponseId, this.outputStreamId)
+        if (this.shouldGateInputDuringPlayback()) {
+          this.suppressInputDuringPlayback = true
+          this.gatedOutputStreamId = this.outputStreamId
+        }
         const audio = Buffer.from(field(event, 'delta'), 'base64')
+        if (effectiveResponseId !== undefined) {
+          this.responseAudioStartedAt.set(effectiveResponseId, this.responseAudioStartedAt.get(effectiveResponseId) ?? Date.now())
+          const durationMs = audio.byteLength / 2 / OUTPUT_SAMPLE_RATE * 1000
+          this.responseAudioDurationMs.set(
+            effectiveResponseId,
+            (this.responseAudioDurationMs.get(effectiveResponseId) ?? 0) + durationMs,
+          )
+        }
         const sequence = this.outputSeq++
         const frame = encodeAudioFrame(
           AudioFrameKind.ServerOutput,
@@ -277,6 +317,7 @@ export class VoiceConnection {
           { ptsMs: Math.round(this.outputPtsMs) },
         )
         this.outputPtsMs += audio.byteLength / 2 / OUTPUT_SAMPLE_RATE * 1000
+        this.persistOutputCursor()
         if (this.socket.readyState !== this.socket.OPEN) return
         this.socket.send(frame, { binary: true }, (error) => {
           if (isWebSocketSendError(error) && !this.closed) this.dispose('browser-audio-send-failed')
@@ -284,23 +325,50 @@ export class VoiceConnection {
         this.sendState('speaking')
         return
       }
-      case 'response.audio_transcript.delta':
+      case 'response.audio_transcript.delta': {
+        const responseId = optionalField(event, 'response_id') ?? this.activeResponseId
+        if (responseId !== undefined && this.suppressedResponses.has(responseId)) return
         this.sendTranscript('assistant', false, field(event, 'delta'))
         return
-      case 'response.audio_transcript.done':
+      }
+      case 'response.audio_transcript.done': {
+        const responseId = optionalField(event, 'response_id') ?? this.activeResponseId
+        if (responseId !== undefined && this.suppressedResponses.has(responseId)) return
         if (this.continuity !== undefined) {
           this.continuity.assistantTranscript = field(event, 'transcript').trim()
           this.runtime.touch(this.continuity)
         }
         this.sendTranscript('assistant', true, field(event, 'transcript'))
         return
+      }
       case 'response.done': {
-        this.suppressMiniInputAudio = false
         const response = event.response as Record<string, unknown> | undefined
-        const responseId = typeof response?.id === 'string' ? response.id : undefined
+        const responseId = typeof response?.id === 'string' ? response.id : this.activeResponseId
+        const suppressed = responseId !== undefined && this.suppressedResponses.has(responseId)
+        const streamId = responseId === undefined ? undefined : this.responseStreams.get(responseId)
+        if (!suppressed && streamId !== undefined) {
+          if (this.hello?.client.playbackDrainAck === true) {
+            this.send({
+              type: 'voice.playback-finalize',
+              serverSeq: this.nextSeq(),
+              streamId,
+              lastSequence: Math.max(0, this.outputSeq - 1),
+            })
+          }
+          if (streamId === this.gatedOutputStreamId && responseId !== undefined) {
+            this.schedulePlaybackFallback(
+              streamId,
+              this.responseAudioDurationMs.get(responseId) ?? 0,
+              this.responseAudioStartedAt.get(responseId) ?? Date.now(),
+            )
+          }
+        }
         if (responseId !== undefined) this.suppressedResponses.delete(responseId)
+        if (responseId !== undefined) this.responseStreams.delete(responseId)
+        if (responseId !== undefined) this.responseAudioDurationMs.delete(responseId)
+        if (responseId !== undefined) this.responseAudioStartedAt.delete(responseId)
         this.activeResponseId = undefined
-        this.sendState(this.agentWorkPending ? 'agent-working' : 'listening')
+        if (!this.suppressInputDuringPlayback) this.sendState(this.agentWorkPending ? 'agent-working' : 'listening')
         return
       }
       case 'transport.closed':
@@ -337,7 +405,7 @@ export class VoiceConnection {
         case 'handoff_to_dsh_agent': {
           const instruction = requiredString(args, 'instruction')
           const handoff = await this.coordinator!.handoff(instruction, this.latestUserTranscript)
-          this.agentWorkPending = true
+          this.refreshAgentWorkPending()
           this.sendState('agent-working')
           this.send({
             type: 'voice.agent-status',
@@ -356,7 +424,7 @@ export class VoiceConnection {
         }
         case 'cancel_dsh_agent':
           output = await this.coordinator!.cancel(optionalString(args, 'reason') ?? '')
-          this.agentWorkPending = false
+          this.refreshAgentWorkPending()
           break
         case 'answer_dsh_approval': {
           const decision = requiredString(args, 'decision')
@@ -400,17 +468,22 @@ export class VoiceConnection {
       for await (const item of this.ctx.apiProxy.events.host(request, abort.signal)) {
         const frame = item.payload
         if (frame.type === 'host/session-status' && frame.sessionId === sessionId) {
-          this.agentWorkPending = frame.running || this.coordinator?.active === true
-          this.send({ type: 'voice.agent-status', serverSeq: this.nextSeq(), sessionId: frame.sessionId, running: frame.running })
+          this.dshTurnRunning = frame.running
+          this.refreshAgentWorkPending()
+          const running = this.agentWorkPending
+          this.send({ type: 'voice.agent-status', serverSeq: this.nextSeq(), sessionId: frame.sessionId, running })
           continue
         }
         if (frame.type === 'host/agent-error' && frame.sessionId === sessionId) {
-          this.agentWorkPending = false
+          this.coordinator?.markFailed()
+          this.dshTurnRunning = false
+          this.activeDshJobs = 0
+          this.refreshAgentWorkPending()
           this.send({
             type: 'voice.agent-status',
             serverSeq: this.nextSeq(),
             sessionId,
-            running: false,
+            running: this.agentWorkPending,
             summary: 'DSH Agent 运行失败。',
           })
           this.provider?.announceBackendEvent(
@@ -449,6 +522,8 @@ export class VoiceConnection {
           const existing = this.coordinator?.listPendingApprovals().find(value => value.approvalId === frame.approvalId)
           this.coordinator?.forgetApproval(frame.approvalId)
           if (existing !== undefined) this.sendApproval(existing, 'resolved', frame.outcome)
+          const next = this.coordinator?.listPendingApprovals()[0]
+          if (next !== undefined) this.sendApproval(next, 'pending')
           continue
         }
         if (frame.type === 'question/requested') {
@@ -477,28 +552,39 @@ export class VoiceConnection {
           const existing = this.coordinator?.listPendingQuestions().find(value => value.rpcId === frame.questionRpcId)
           this.coordinator?.forgetQuestion(frame.questionRpcId)
           if (existing !== undefined) this.sendQuestion(existing, 'resolved', frame.outcome)
+          const next = this.coordinator?.listPendingQuestions()[0]
+          if (next !== undefined) this.sendQuestion(next, 'pending')
+          continue
+        }
+        if (frame.type === 'session/queue') {
+          this.coordinator?.observeQueue(frame.items)
           continue
         }
         if (frame.type === 'session/jobs') {
           const active = frame.jobs.filter(job => job.status === 'running' || job.status === 'stopping')
-          if (active.length > 0) {
-            this.agentWorkPending = true
-            this.send({
-              type: 'voice.agent-status',
-              serverSeq: this.nextSeq(),
-              sessionId,
-              running: true,
-              summary: active.map(job => job.label).join('、').slice(0, 1_200),
-            })
-          }
+          this.activeDshJobs = active.length
+          this.refreshAgentWorkPending()
+          this.send({
+            type: 'voice.agent-status',
+            serverSeq: this.nextSeq(),
+            sessionId,
+            running: this.agentWorkPending,
+            ...(active.length === 0 ? {} : { summary: active.map(job => job.label).join('、').slice(0, 1_200) }),
+          })
           continue
         }
         if (frame.type !== 'session/event') continue
         const event = frame.event
+        if (event.type === 'user/message') {
+          const rpcId = messageSourceRpcId(event.data)
+          if (rpcId !== undefined) this.coordinator?.observeUserMessage(rpcId)
+          continue
+        }
         if (event.type === 'turn/start') {
           const data = event.data as Record<string, unknown>
           if (typeof data.turn === 'number') this.coordinator?.markTurnStarted(data.turn)
-          this.agentWorkPending = true
+          this.dshTurnRunning = true
+          this.refreshAgentWorkPending()
           this.sendState('agent-working')
           continue
         }
@@ -507,6 +593,7 @@ export class VoiceConnection {
           const turn = data.turn
           const text = assistantText(event)
           if (typeof turn === 'number' && text !== undefined) {
+            this.coordinator?.observeTurnEvent(turn)
             this.pendingAssistantByTurn.set(`${frame.sessionId}:${turn}`, text)
             this.send({
               type: 'voice.agent-status',
@@ -524,6 +611,7 @@ export class VoiceConnection {
         }
         if (event.type === 'tool/call') {
           const data = event.data as Record<string, unknown>
+          if (typeof data.turn === 'number') this.coordinator?.observeTurnEvent(data.turn)
           const name = typeof data.name === 'string' ? data.name : '工具'
           this.send({
             type: 'voice.agent-status',
@@ -543,12 +631,13 @@ export class VoiceConnection {
         this.pendingAssistantByTurn.delete(key)
         const reason = turnEndKind(data.reason)
         this.coordinator?.markTurnEnded(turn, reason)
-        this.agentWorkPending = false
+        this.dshTurnRunning = false
+        this.refreshAgentWorkPending()
         this.send({
           type: 'voice.agent-status',
           serverSeq: this.nextSeq(),
           sessionId,
-          running: false,
+          running: this.agentWorkPending,
           ...(text === undefined ? {} : { summary: text.slice(0, 1_200) }),
         })
         const resultText = text ?? `DSH Agent 已结束本轮工作，结束状态为 ${reason}。`
@@ -563,6 +652,88 @@ export class VoiceConnection {
     })
   }
 
+  /**
+   * Fold durable history after the live mux subscription is open. This closes
+   * the provider-connect/reconnect gap without replaying already-terminal
+   * handoffs: coordinator transitions are idempotent and scoped by prompt rpcId.
+   */
+  private async reconcileDshHistory(sessionId: string): Promise<void> {
+    const coordinator = this.coordinator
+    if (coordinator === undefined) return
+    try {
+      const response = await this.ctx.apiProxy.sessions.history({
+        rpcId: this.rpcId(),
+        payload: { sessionId: SessionId(sessionId), maxMessages: 128 },
+      })
+      if (!response.result.ok) throw new Error(response.result.error.message)
+      const assistantByTurn = new Map<number, string>()
+      for (const entry of response.result.value.events) {
+        const event = entry.event
+        if (typeof event !== 'object' || event === null) continue
+        const typed = event as Record<string, unknown>
+        const data = typed.data as Record<string, unknown> | undefined
+        if (typed.type === 'turn/start' && typeof data?.turn === 'number') {
+          coordinator.markTurnStarted(data.turn)
+          this.dshTurnRunning = true
+          continue
+        }
+        if (typed.type === 'user/message') {
+          const sourceRpcId = messageSourceRpcId(data)
+          if (sourceRpcId !== undefined) coordinator.observeUserMessage(sourceRpcId)
+          continue
+        }
+        if (typed.type === 'assistant/message') {
+          const text = assistantText(event)
+          if (typeof data?.turn === 'number') {
+            coordinator.observeTurnEvent(data.turn)
+            if (text !== undefined) assistantByTurn.set(data.turn, text)
+          }
+          continue
+        }
+        if (typed.type !== 'turn/end' || typeof data?.turn !== 'number') {
+          if (typeof data?.turn === 'number') coordinator.observeTurnEvent(data.turn)
+          continue
+        }
+        const reason = turnEndKind(data.reason)
+        const ended = coordinator.markTurnEnded(data.turn, reason)
+        this.dshTurnRunning = false
+        this.refreshAgentWorkPending()
+        if (ended.length === 0) continue
+        const text = assistantByTurn.get(data.turn)
+        const resultText = text ?? `DSH Agent 已结束本轮工作，结束状态为 ${reason}。`
+        const completionTag = reason === 'completed' ? '[COMPLETE]' : reason === 'cancelled' ? '[CANCELLED]' : '[FAILED]'
+        this.send({
+          type: 'voice.agent-status',
+          serverSeq: this.nextSeq(),
+          sessionId,
+          running: coordinator.active,
+          ...(text === undefined ? {} : { summary: text.slice(0, 1_200) }),
+        })
+        this.provider?.announceBackendEvent(
+          `backend_recovered_complete_${String(typed.seq ?? data.turn)}`,
+          `${completionTag} ${resultText}\n这是重连后从 DSH 权威历史恢复的终态。请简短、准确地向用户汇报；不要再次提交已经完成的任务。`,
+        )
+      }
+      // History may include older completed turns. Re-read the authoritative
+      // current session flag after folding it so an old terminal cannot make a
+      // presently running Agent look idle.
+      const current = await this.session?.snapshot()
+      if (current !== undefined) {
+        this.dshTurnRunning = current.running
+        this.refreshAgentWorkPending()
+        this.send({
+          type: 'voice.agent-status',
+          serverSeq: this.nextSeq(),
+          sessionId,
+          running: this.agentWorkPending,
+          ...(current.summary === undefined ? {} : { summary: current.summary }),
+        })
+      }
+    } catch (error) {
+      this.ctx.logger.warn(`[realtime-voice] failed to reconcile DSH history: ${String(error)}`)
+    }
+  }
+
   private async answerApproval(
     approvalId: string,
     outcome: 'allowed-once' | 'rejected',
@@ -572,6 +743,8 @@ export class VoiceConnection {
     await this.coordinator!.resolveApproval(approvalId, outcome)
     this.coordinator!.forgetApproval(approvalId)
     this.sendApproval(pending, 'resolved', outcome)
+    const next = this.coordinator!.listPendingApprovals()[0]
+    if (next !== undefined) this.sendApproval(next, 'pending')
     this.provider?.announceBackendEvent(
       `backend_approval_answer_${approvalId}_${outcome}`,
       `[STATUS] 用户已${outcome === 'allowed-once' ? '允许本次操作' : '拒绝本次操作'}，DSH Agent 将继续处理。无需再次询问。`,
@@ -584,6 +757,8 @@ export class VoiceConnection {
     await this.coordinator!.answerQuestion(requestId, answers)
     this.coordinator!.forgetQuestion(requestId)
     this.sendQuestion(pending, 'resolved', 'answered')
+    const next = this.coordinator!.listPendingQuestions()[0]
+    if (next !== undefined) this.sendQuestion(next, 'pending')
     this.provider?.announceBackendEvent(
       `backend_question_answer_${requestId}`,
       '[STATUS] 用户的补充答案已经送回 DSH Agent，任务将继续。无需重复提问。',
@@ -597,7 +772,7 @@ export class VoiceConnection {
   ): void {
     if (this.continuity !== undefined) {
       if (status === 'pending') this.continuity.pendingApproval = approval
-      else delete this.continuity.pendingApproval
+      else if (this.continuity.pendingApproval?.approvalId === approval.approvalId) delete this.continuity.pendingApproval
       this.runtime.touch(this.continuity)
     }
     this.send({
@@ -622,7 +797,7 @@ export class VoiceConnection {
   ): void {
     if (this.continuity !== undefined) {
       if (status === 'pending') this.continuity.pendingQuestion = question
-      else delete this.continuity.pendingQuestion
+      else if (this.continuity.pendingQuestion?.rpcId === question.rpcId) delete this.continuity.pendingQuestion
       this.runtime.touch(this.continuity)
     }
     this.send({
@@ -642,10 +817,46 @@ export class VoiceConnection {
   }
 
   private clearPlayback(reason: 'barge-in' | 'cancelled'): void {
+    if (this.playbackDrainFallbackTimer !== undefined) clearTimeout(this.playbackDrainFallbackTimer)
+    this.playbackDrainFallbackTimer = undefined
+    this.suppressInputDuringPlayback = false
+    this.gatedOutputStreamId = undefined
     this.outputStreamId += 1
     this.outputSeq = 0
     this.outputPtsMs = 0
+    this.persistOutputCursor()
     this.send({ type: 'voice.playback-clear', serverSeq: this.nextSeq(), streamId: this.outputStreamId, reason })
+  }
+
+  private shouldGateInputDuringPlayback(): boolean {
+    return this.hello !== undefined && this.hello.client.duplex !== 'full'
+  }
+
+  /**
+   * Older V1 clients do not send playback-drained. Estimate the
+   * remaining local queue from delivered PCM and release with a safety margin,
+   * so compatibility mode can reduce echo without ever permanently muting mic.
+   */
+  private schedulePlaybackFallback(streamId: number, durationMs: number, startedAt: number): void {
+    if (this.playbackDrainFallbackTimer !== undefined) clearTimeout(this.playbackDrainFallbackTimer)
+    const estimatedRemainingMs = Math.max(0, durationMs - (Date.now() - startedAt))
+    const delayMs = Math.max(1_500, Math.ceil(estimatedRemainingMs + 1_500))
+    this.playbackDrainFallbackTimer = setTimeout(() => {
+      this.playbackDrainFallbackTimer = undefined
+      if (this.gatedOutputStreamId !== streamId) return
+      this.ctx.logger.warn('[realtime-voice] playback-drained was not acknowledged; releasing input gate by bounded PCM fallback')
+      this.releasePlaybackGate()
+    }, delayMs)
+  }
+
+  private releasePlaybackGate(): void {
+    if (this.playbackDrainFallbackTimer !== undefined) clearTimeout(this.playbackDrainFallbackTimer)
+    this.playbackDrainFallbackTimer = undefined
+    this.suppressInputDuringPlayback = false
+    this.gatedOutputStreamId = undefined
+    if (this.activeResponseId === undefined) {
+      this.sendState(this.agentWorkPending ? 'agent-working' : 'listening')
+    }
   }
 
   /** Stop one response exactly once, even when local and provider VAD race. */
@@ -679,6 +890,10 @@ export class VoiceConnection {
     this.send({ type: 'voice.state', serverSeq: this.nextSeq(), phase })
   }
 
+  private refreshAgentWorkPending(): void {
+    this.agentWorkPending = this.dshTurnRunning || this.activeDshJobs > 0 || this.coordinator?.active === true
+  }
+
   private fail(code: string, message: string, recoverable: boolean): void {
     this.send({ type: 'voice.error', serverSeq: this.nextSeq(), code, message, recoverable })
     if (!recoverable) this.dispose(code)
@@ -691,7 +906,19 @@ export class VoiceConnection {
 
   private nextSeq(): number {
     this.serverSeq += 1
+    if (this.continuity !== undefined) {
+      this.continuity.serverSeq = this.serverSeq
+      this.runtime.touch(this.continuity)
+    }
     return this.serverSeq
+  }
+
+  private persistOutputCursor(): void {
+    if (this.continuity === undefined) return
+    this.continuity.outputStreamId = this.outputStreamId
+    this.continuity.outputSequence = this.outputSeq
+    this.continuity.outputPtsMs = this.outputPtsMs
+    this.runtime.touch(this.continuity)
   }
 
   private rpcId() {
@@ -712,10 +939,28 @@ function validateAudioNegotiation(hello: VoiceHello): void {
   }
 }
 
+/** Deterministic, platform-neutral hello → ready capability negotiation. */
+export function negotiateVoiceCapabilities(hello: VoiceHello): VoiceReady['capabilities'] {
+  return {
+    bargeIn: hello.client.duplex !== 'turn-based',
+    functionCalling: true,
+    reconnect: true,
+    persistentAgentTask: true,
+    playbackDrainAck: hello.client.playbackDrainAck === true,
+  }
+}
+
 function normalizeRawData(raw: WebSocket.RawData): Uint8Array {
   if (raw instanceof ArrayBuffer) return new Uint8Array(raw)
   if (Array.isArray(raw)) return new Uint8Array(Buffer.concat(raw))
   return new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength)
+}
+
+function isTransientDisconnect(reason: string): boolean {
+  return reason === 'client-disconnected'
+    || reason === 'client-error'
+    || reason === 'provider-disconnected'
+    || reason === 'browser-audio-send-failed'
 }
 
 export function buildInstructions(
@@ -749,6 +994,14 @@ function field(value: Record<string, unknown>, name: string): string {
 function optionalField(value: Record<string, unknown>, name: string): string | undefined {
   const result = value[name]
   return typeof result === 'string' ? result : undefined
+}
+
+function messageSourceRpcId(value: unknown): string | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const source = (value as Record<string, unknown>).source
+  if (typeof source !== 'object' || source === null) return undefined
+  const rpcId = (source as Record<string, unknown>).rpcId
+  return typeof rpcId === 'string' && rpcId !== '' ? rpcId : undefined
 }
 
 const REALTIME_FUNCTION_TOOLS: readonly RealtimeFunctionTool[] = [

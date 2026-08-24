@@ -4,6 +4,7 @@ export const VOICE_PROTOCOL = 'dsh.voice.v1' as const
 export const VOICE_PROTOCOL_VERSION = 1 as const
 export const VOICE_ROUTE = '/plugins/realtime-voice/v1' as const
 export const VOICE_STATUS_ROUTE = '/plugins/realtime-voice/v1/status' as const
+export const VOICE_WEB_CLIENT_VERSION = '0.1.0-alpha.9-research.2' as const
 
 export const INPUT_SAMPLE_RATE = 16_000 as const
 export const OUTPUT_SAMPLE_RATE = 24_000 as const
@@ -38,10 +39,12 @@ export interface VoiceHello {
     version: string
     binaryWebSocket: true
     playbackClear: true
-    /** Mini Program clients must only set this after a real-device PCM layout probe. */
+    /** Native clients must only set this after a real-device PCM layout probe. */
     pcmS16leVerified: true
     foregroundOnly: boolean
     duplex: 'full' | 'best-effort' | 'turn-based'
+    /** Whether this transport can ACK after its actual local player queue drains. */
+    playbackDrainAck?: boolean
   }
   target: { sessionId: string }
   audio: {
@@ -89,6 +92,7 @@ export interface VoiceQuestion {
 export type VoiceClientControl = VoiceHello
   | { type: 'voice.end'; reason?: string }
   | { type: 'voice.cancel-response' }
+  | { type: 'voice.playback-drained'; streamId: number }
   | { type: 'voice.commit' }
   | { type: 'voice.approval-answer'; approvalId: string; outcome: 'allowed-once' | 'rejected' }
   | { type: 'voice.question-answer'; requestId: string; answers: VoiceQuestionAnswer[] }
@@ -107,10 +111,11 @@ export interface VoiceReady {
     maxBinaryFrameBytes: number
   }
   capabilities: {
-    bargeIn: true
+    bargeIn: boolean
     functionCalling: boolean
     reconnect: true
     persistentAgentTask: true
+    playbackDrainAck: boolean
   }
 }
 
@@ -118,7 +123,6 @@ export interface VoiceOccupancyOwner {
   platform: VoiceClientPlatform
   clientVersion: string
   sessionId: string
-  voiceSessionId: string
   startedAt: number
   lastSeenAt: number
 }
@@ -141,6 +145,7 @@ export type VoiceServerControl = VoiceReady
     stash?: string
   }
   | { type: 'voice.playback-clear'; serverSeq: number; streamId: number; reason: 'barge-in' | 'cancelled' }
+  | { type: 'voice.playback-finalize'; serverSeq: number; streamId: number; lastSequence: number }
   | { type: 'voice.agent-status'; serverSeq: number; sessionId: string; running: boolean; summary?: string }
   | {
     type: 'voice.approval'
@@ -259,6 +264,11 @@ export function isVoiceClientControl(value: unknown): value is VoiceClientContro
   const message = value as Record<string, unknown>
   if (message.type === 'voice.end') return message.reason === undefined || (typeof message.reason === 'string' && message.reason.length <= 128)
   if (message.type === 'voice.cancel-response' || message.type === 'voice.commit') return true
+  if (message.type === 'voice.playback-drained') {
+    return typeof message.streamId === 'number'
+      && Number.isSafeInteger(message.streamId)
+      && message.streamId >= 0
+  }
   if (message.type === 'voice.approval-answer') {
     return typeof message.approvalId === 'string'
       && message.approvalId.length > 0
@@ -292,6 +302,7 @@ export function isVoiceClientControl(value: unknown): value is VoiceClientContro
     && client.pcmS16leVerified === true
     && typeof client.foregroundOnly === 'boolean'
     && (client.duplex === 'full' || client.duplex === 'best-effort' || client.duplex === 'turn-based')
+    && (client.playbackDrainAck === undefined || typeof client.playbackDrainAck === 'boolean')
     && typeof target?.sessionId === 'string'
     && target.sessionId.length > 0
     && target.sessionId.length <= 256

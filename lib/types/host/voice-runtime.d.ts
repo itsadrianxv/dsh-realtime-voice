@@ -4,10 +4,15 @@ import { type VoiceClientPlatform, type VoiceOccupancyStatus } from '../protocol
 export interface VoiceContinuityState {
     id: string;
     sessionId: string;
+    platform: VoiceClientPlatform;
     createdAt: number;
     lastSeenAt: number;
     userTranscript: string;
     assistantTranscript: string;
+    serverSeq: number;
+    outputStreamId: number;
+    outputSequence: number;
+    outputPtsMs: number;
     coordinator: DshVoiceCoordinatorState;
     pendingApproval?: PendingVoiceApproval;
     pendingQuestion?: PendingVoiceQuestion;
@@ -26,6 +31,7 @@ export type VoiceLeaseResult = {
     resumed: boolean;
 } | {
     ok: false;
+    reason: 'busy' | 'invalid-resume';
     occupancy: VoiceOccupancyStatus;
 };
 /**
@@ -35,12 +41,14 @@ export type VoiceLeaseResult = {
  */
 export declare class VoiceRuntime {
     private readonly retentionMs;
+    private readonly reconnectGraceMs;
+    private readonly heartbeatTimeoutMs;
     private readonly calls;
     private activeLease;
-    constructor(retentionMs?: number);
+    constructor(retentionMs?: number, reconnectGraceMs?: number, heartbeatTimeoutMs?: number);
     acquireLease(request: VoiceLeaseRequest): VoiceLeaseResult;
     touch(state: VoiceContinuityState): void;
-    release(connectionId: string): void;
+    release(connectionId: string, retainForResume?: boolean): void;
     occupancy(): VoiceOccupancyStatus;
     clear(): void;
     private sweep;

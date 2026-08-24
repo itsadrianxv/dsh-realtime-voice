@@ -15,6 +15,7 @@ export class BrowserAudioEngine {
   constructor(
     private readonly onInput: (pcm: ArrayBuffer) => void,
     private readonly onSpeechStart: () => void = () => {},
+    private readonly onPlaybackDrained: (streamId: number) => void = () => {},
   ) {}
 
   async start(): Promise<void> {
@@ -53,6 +54,11 @@ export class BrowserAudioEngine {
       processorOptions: { sourceSampleRate: OUTPUT_SAMPLE_RATE },
     })
     playback.connect(context.destination)
+    playback.port.onmessage = (event: MessageEvent<{ type?: string; epoch?: number }>) => {
+      if (event.data.type === 'drained' && typeof event.data.epoch === 'number') {
+        this.onPlaybackDrained(event.data.epoch)
+      }
+    }
     this.playback = playback
     await context.resume()
   }
@@ -66,6 +72,10 @@ export class BrowserAudioEngine {
   clear(epoch: number): void {
     this.playbackEpoch = epoch
     this.playback?.port.postMessage({ type: 'clear', epoch })
+  }
+
+  finalize(epoch: number): void {
+    this.playback?.port.postMessage({ type: 'finalize', epoch })
   }
 
   /** Synchronous local barge-in; Host will confirm the same next stream epoch. */

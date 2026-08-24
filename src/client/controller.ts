@@ -9,6 +9,7 @@ import {
   VOICE_PROTOCOL,
   VOICE_ROUTE,
   VOICE_STATUS_ROUTE,
+  VOICE_WEB_CLIENT_VERSION,
   type VoiceApproval,
   type VoicePhase,
   type VoiceQuestion,
@@ -64,6 +65,11 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
   private lastReconnectError: string | undefined
   private ending = false
   private presenceTimer: ReturnType<typeof setInterval> | undefined
+  private heartbeatTimer: ReturnType<typeof setInterval> | undefined
+  private startEpoch = 0
+  private presenceRequestSeq = 0
+  private lastServerSeq = 0
+  private lastOutputStreamId = 0
 
   getSnapshot = (): VoiceSnapshot => this.snapshot
 
@@ -86,7 +92,11 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
       this.update({ ...INITIAL_SNAPSHOT, phase: 'error', error: '实时语音需要安全上下文：请使用 localhost 或 HTTPS。' })
       return
     }
+    const startEpoch = ++this.startEpoch
+    this.ending = false
+    this.update({ ...INITIAL_SNAPSHOT, phase: 'connecting', sessionId })
     const occupancy = await this.refreshPresence()
+    if (startEpoch !== this.startEpoch || this.ending) return
     if (occupancy?.active) {
       this.update({
         ...INITIAL_SNAPSHOT,
@@ -96,7 +106,6 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
       })
       return
     }
-    this.ending = false
     this.reconnectAttempt = 0
     this.lastReconnectError = undefined
     this.update({ ...INITIAL_SNAPSHOT, phase: 'requesting-permission', sessionId })
@@ -104,6 +113,7 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
       const audio = new BrowserAudioEngine(
         pcm => this.sendAudio(pcm),
         () => this.handleLocalSpeechStart(),
+        streamId => this.sendControl({ type: 'voice.playback-drained', streamId }),
       )
       this.audio = audio
       await audio.start()
@@ -126,6 +136,7 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
     this.update({ ...this.snapshot, phase: 'ending' })
     this.sendControl({ type: 'voice.end', reason: 'user-ended' })
     await this.cleanup()
+    this.resetCallCursors()
     this.update(INITIAL_SNAPSHOT)
   }
 
@@ -196,12 +207,13 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
           requestId: crypto.randomUUID(),
           client: {
             platform: 'web',
-            version: '0.1.0',
+            version: VOICE_WEB_CLIENT_VERSION,
             binaryWebSocket: true,
             playbackClear: true,
             pcmS16leVerified: true,
             foregroundOnly: false,
             duplex: 'full',
+            playbackDrainAck: true,
           },
           target: { sessionId },
           audio: {
@@ -210,7 +222,7 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
           },
           ...(this.snapshot.voiceSessionId === undefined
             ? {}
-            : { resume: { voiceSessionId: this.snapshot.voiceSessionId, lastServerSeq: 0 } }),
+            : { resume: { voiceSessionId: this.snapshot.voiceSessionId, lastServerSeq: this.lastServerSeq } }),
         }))
       }
       socket.onmessage = (event) => {
@@ -230,6 +242,7 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
           socket.removeEventListener('message', ready)
           clearTimeout(readyTimeout)
           this.providerReady = true
+          this.startHeartbeat()
           this.reconnectAttempt = 0
           this.lastReconnectError = undefined
           if (!settled) {
@@ -257,9 +270,9 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
         if (this.socket !== socket || epoch !== this.connectionEpoch) return
         this.socket = undefined
         this.providerReady = false
-        // A new Host connection restarts its output stream ids at 1. Reset the
-        // AudioWorklet epoch so it does not discard the recovered call as stale.
-        this.audio?.clear(0)
+        // Drop queued audio from the dead transport without moving the stream
+        // epoch ahead of the Host's continuity cursor.
+        this.audio?.clear(this.lastOutputStreamId)
         const reason = event.reason.trim()
         if (this.lastReconnectError === undefined || reason !== 'provider-disconnected') {
           this.lastReconnectError = reason === ''
@@ -275,11 +288,16 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
   private receive(event: MessageEvent): void {
     if (event.data instanceof ArrayBuffer) {
       const frame = decodeAudioFrame(event.data)
-      if (frame.kind === AudioFrameKind.ServerOutput) this.audio?.play(frame.payload, frame.streamId)
+      if (frame.kind === AudioFrameKind.ServerOutput) {
+        this.lastOutputStreamId = Math.max(this.lastOutputStreamId, frame.streamId)
+        this.audio?.play(frame.payload, frame.streamId)
+      }
       return
     }
     if (typeof event.data !== 'string') return
     const message = JSON.parse(event.data) as VoiceServerControl
+    if (message.serverSeq <= this.lastServerSeq) return
+    this.lastServerSeq = message.serverSeq
     switch (message.type) {
       case 'voice.ready':
         this.update({
@@ -317,7 +335,11 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
         }
         return
       case 'voice.playback-clear':
+        this.lastOutputStreamId = Math.max(this.lastOutputStreamId, message.streamId)
         this.audio?.clear(message.streamId)
+        return
+      case 'voice.playback-finalize':
+        this.audio?.finalize(message.streamId)
         return
       case 'voice.agent-status':
         this.update({
@@ -329,7 +351,7 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
       case 'voice.approval':
         if (message.status === 'pending') {
           this.update({ ...this.snapshot, pendingApproval: message.approval })
-        } else {
+        } else if (this.snapshot.pendingApproval?.approvalId === message.approval.approvalId) {
           const { pendingApproval: _pendingApproval, ...withoutApproval } = this.snapshot
           this.update(withoutApproval)
         }
@@ -337,7 +359,7 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
       case 'voice.question':
         if (message.status === 'pending') {
           this.update({ ...this.snapshot, pendingQuestion: message.question })
-        } else {
+        } else if (this.snapshot.pendingQuestion?.requestId === message.question.requestId) {
           const { pendingQuestion: _pendingQuestion, ...withoutQuestion } = this.snapshot
           this.update(withoutQuestion)
         }
@@ -416,15 +438,19 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
   private async fail(message: string): Promise<void> {
     this.ending = true
     await this.cleanup()
+    this.resetCallCursors()
     this.update({ ...INITIAL_SNAPSHOT, phase: 'error', error: message })
   }
 
   private async cleanup(): Promise<void> {
+    this.startEpoch += 1
     this.connectionEpoch += 1
     if (this.timer !== undefined) clearInterval(this.timer)
     if (this.reconnectTimer !== undefined) clearTimeout(this.reconnectTimer)
+    if (this.heartbeatTimer !== undefined) clearInterval(this.heartbeatTimer)
     this.timer = undefined
     this.reconnectTimer = undefined
+    this.heartbeatTimer = undefined
     const socket = this.socket
     this.socket = undefined
     if (socket !== undefined && socket.readyState < WebSocket.CLOSING) socket.close(1000, 'voice client closed')
@@ -437,16 +463,30 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
   }
 
   private async refreshPresence(): Promise<VoiceOccupancyStatus | undefined> {
+    const requestSeq = ++this.presenceRequestSeq
     try {
       const response = await fetch(VOICE_STATUS_ROUTE, { cache: 'no-store' })
       if (!response.ok) return undefined
       const occupancy = await response.json() as VoiceOccupancyStatus
       if (occupancy.protocol !== VOICE_PROTOCOL || typeof occupancy.active !== 'boolean') return undefined
+      if (requestSeq !== this.presenceRequestSeq) return undefined
       this.update({ ...this.snapshot, occupancy })
       return occupancy
     } catch {
       return undefined
     }
+  }
+
+  private startHeartbeat(): void {
+    if (this.heartbeatTimer !== undefined) return
+    this.heartbeatTimer = setInterval(() => {
+      this.sendControl({ type: 'voice.ping', sentAt: Date.now() })
+    }, 15_000)
+  }
+
+  private resetCallCursors(): void {
+    this.lastServerSeq = 0
+    this.lastOutputStreamId = 0
   }
 
   private update(next: VoiceSnapshot): void {
@@ -456,6 +496,6 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
 }
 
 function busyMessage(occupancy: VoiceOccupancyStatus): string {
-  const platform = occupancy.owner?.platform === 'wechat-mini-program' ? '微信小程序' : '另一个客户端'
-  return `实时语音正由${platform}占用，请先在该端结束通话。`
+  void occupancy
+  return '实时语音正由另一个客户端占用，请先在该端结束通话。'
 }
