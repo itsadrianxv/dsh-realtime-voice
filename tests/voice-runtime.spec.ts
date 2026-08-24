@@ -174,7 +174,7 @@ describe('VoiceRuntime authoritative occupancy', () => {
     const web = runtime.acquireLease({
       connectionId: 'web-new',
       platform: 'web',
-      clientVersion: '0.1.0-alpha.9-research.3',
+      clientVersion: '0.1.0-alpha.9-research.4',
       sessionId: 'session-1',
       resumeId: initial.state.id,
       revoke: vi.fn(),

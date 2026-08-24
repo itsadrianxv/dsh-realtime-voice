@@ -7,11 +7,13 @@ import { SessionId } from '@deepseek-ai/dsh-session/types'
 import type WebSocket from 'ws'
 import {
   AUDIO_CHANNELS,
+  AudioFrameFlags,
   AudioFrameKind,
   decodeAudioFrame,
   encodeAudioFrame,
   INPUT_SAMPLE_RATE,
   isVoiceClientControl,
+  OUTPUT_FRAME_DURATION_MS,
   OUTPUT_SAMPLE_RATE,
   VOICE_PROTOCOL,
   type VoiceHello,
@@ -32,7 +34,11 @@ import {
 } from './dsh-coordinator.ts'
 import { assistantText, DshVoiceSession } from './dsh-session-state.ts'
 import { isWebSocketSendError } from './websocket-send.ts'
+import { ResponsePcmPacketizer } from './pcm-packetizer.ts'
 import { VoiceRuntime, type VoiceContinuityState } from './voice-runtime.ts'
+
+const MAX_BROWSER_AUDIO_BUFFERED_BYTES = 4 * 1024 * 1024
+const BROWSER_AUDIO_SEND_TIMEOUT_MS = 15_000
 
 /** One client-neutral voice call, pinned to one DSH session for its full lifetime. */
 export class VoiceConnection {
@@ -49,13 +55,19 @@ export class VoiceConnection {
   private session: DshVoiceSession | undefined
   private coordinator: DshVoiceCoordinator | undefined
   private activeResponseId: string | undefined
-  /** Non-full-duplex clients gate upstream PCM during downlink playback. An
-   * explicit barge-in or negotiated local playback drain re-opens it. */
+  /** Compatibility gate for clients that did not negotiate local correlated
+   * echo filtering. Capable clients keep forwarding near-end speech/pre-roll. */
   private suppressInputDuringPlayback = false
   private gatedOutputStreamId: number | undefined
   private readonly responseStreams = new Map<string, number>()
+  private readonly responseLastSequences = new Map<string, number>()
   private readonly responseAudioDurationMs = new Map<string, number>()
   private readonly responseAudioStartedAt = new Map<string, number>()
+  private readonly outputPacketizer = new ResponsePcmPacketizer()
+  private browserAudioSendTail: Promise<void> = Promise.resolve()
+  private browserAudioGeneration = 0
+  private queuedBrowserAudioBytes = 0
+  private browserAudioTransportFailed = false
   private playbackDrainFallbackTimer: ReturnType<typeof setTimeout> | undefined
   private readonly suppressedResponses = new Set<string>()
   private readonly handledFunctionCalls = new Set<string>()
@@ -99,6 +111,8 @@ export class VoiceConnection {
   dispose(reason = 'plugin-disposed'): void {
     if (this.closed) return
     this.closed = true
+    this.browserAudioGeneration += 1
+    this.outputPacketizer.clear()
     clearTimeout(this.helloTimer)
     if (this.playbackDrainFallbackTimer !== undefined) clearTimeout(this.playbackDrainFallbackTimer)
     this.hostEventsAbort?.abort()
@@ -139,7 +153,16 @@ export class VoiceConnection {
       }
       this.nextInputSequence += 1
       if (this.suppressInputDuringPlayback) return
-      this.provider.appendAudio(frame.payload)
+      try {
+        this.provider.appendAudio(frame.payload)
+      } catch (error) {
+        this.fail(
+          'provider-input-backpressure',
+          `上行语音传输失控，正在通过可恢复连接重试：${error instanceof Error ? error.message : String(error)}`,
+          true,
+        )
+        this.dispose('provider-input-backpressure')
+      }
       return
     }
     const parsed: unknown = JSON.parse(raw.toString())
@@ -243,9 +266,7 @@ export class VoiceConnection {
         turnDetection: this.config.turnDetection,
       },
       audio: {
-        input: { encoding: 'pcm_s16le', sampleRate: INPUT_SAMPLE_RATE, channels: AUDIO_CHANNELS, frameDurationMs: 40 },
-        output: { encoding: 'pcm_s16le', sampleRate: OUTPUT_SAMPLE_RATE, channels: AUDIO_CHANNELS, frameDurationMs: 40 },
-        maxBinaryFrameBytes: this.config.maxBinaryFrameBytes,
+        ...negotiateVoiceAudio(hello, this.config.maxBinaryFrameBytes),
       },
       capabilities: negotiateVoiceCapabilities(hello),
     })
@@ -295,36 +316,30 @@ export class VoiceConnection {
       case 'response.audio.delta': {
         const responseId = optionalField(event, 'response_id')
         const effectiveResponseId = responseId ?? this.activeResponseId
+        if (effectiveResponseId === undefined) {
+          this.failProviderAudio('DashScope audio delta is missing its response id')
+          return
+        }
         if (effectiveResponseId !== undefined && this.suppressedResponses.has(effectiveResponseId)) return
-        if (effectiveResponseId !== undefined) this.responseStreams.set(effectiveResponseId, this.outputStreamId)
-        if (this.shouldGateInputDuringPlayback()) {
-          this.suppressInputDuringPlayback = true
-          this.gatedOutputStreamId = this.outputStreamId
-        }
         const audio = Buffer.from(field(event, 'delta'), 'base64')
-        if (effectiveResponseId !== undefined) {
-          this.responseAudioStartedAt.set(effectiveResponseId, this.responseAudioStartedAt.get(effectiveResponseId) ?? Date.now())
-          const durationMs = audio.byteLength / 2 / OUTPUT_SAMPLE_RATE * 1000
-          this.responseAudioDurationMs.set(
-            effectiveResponseId,
-            (this.responseAudioDurationMs.get(effectiveResponseId) ?? 0) + durationMs,
-          )
+        if (audio.byteLength === 0) {
+          this.failProviderAudio('DashScope audio delta decoded to an empty PCM payload')
+          return
         }
-        const sequence = this.outputSeq++
-        const frame = encodeAudioFrame(
-          AudioFrameKind.ServerOutput,
-          this.outputStreamId,
-          sequence,
-          audio,
-          { ptsMs: Math.round(this.outputPtsMs) },
+        this.responseAudioStartedAt.set(effectiveResponseId, this.responseAudioStartedAt.get(effectiveResponseId) ?? Date.now())
+        const durationMs = audio.byteLength / 2 / OUTPUT_SAMPLE_RATE * 1000
+        this.responseAudioDurationMs.set(
+          effectiveResponseId,
+          (this.responseAudioDurationMs.get(effectiveResponseId) ?? 0) + durationMs,
         )
-        this.outputPtsMs += audio.byteLength / 2 / OUTPUT_SAMPLE_RATE * 1000
-        this.persistOutputCursor()
-        if (this.socket.readyState !== this.socket.OPEN) return
-        this.socket.send(frame, { binary: true }, (error) => {
-          if (isWebSocketSendError(error) && !this.closed) this.dispose('browser-audio-send-failed')
-        })
-        this.sendState('speaking')
+        try {
+          for (const packet of this.outputPacketizer.push(effectiveResponseId, audio)) {
+            this.emitOutputPacket(effectiveResponseId, packet)
+          }
+        } catch (error) {
+          this.outputPacketizer.discard(effectiveResponseId)
+          this.failProviderAudio(error instanceof Error ? error.message : String(error))
+        }
         return
       }
       case 'response.audio_transcript.delta': {
@@ -347,26 +362,39 @@ export class VoiceConnection {
         const response = event.response as Record<string, unknown> | undefined
         const responseId = typeof response?.id === 'string' ? response.id : this.activeResponseId
         const suppressed = responseId !== undefined && this.suppressedResponses.has(responseId)
-        const streamId = responseId === undefined ? undefined : this.responseStreams.get(responseId)
-        if (!suppressed && streamId !== undefined) {
-          if (this.hello?.client.playbackDrainAck === true) {
-            this.send({
-              type: 'voice.playback-finalize',
-              serverSeq: this.nextSeq(),
-              streamId,
-              lastSequence: Math.max(0, this.outputSeq - 1),
+        if (!suppressed && responseId !== undefined) {
+          const tail = this.outputPacketizer.flush(responseId)
+          if (tail !== undefined) {
+            this.emitOutputPacket(responseId, tail, AudioFrameFlags.EndOfStream)
+          }
+          const streamId = this.responseStreams.get(responseId)
+          const lastSequence = this.responseLastSequences.get(responseId)
+          if (streamId !== undefined && lastSequence !== undefined) {
+            const generation = this.browserAudioGeneration
+            const durationMs = this.responseAudioDurationMs.get(responseId) ?? 0
+            const startedAt = this.responseAudioStartedAt.get(responseId) ?? Date.now()
+            const sendBarrier = this.browserAudioSendTail
+            void sendBarrier.then(() => {
+              if (this.closed || generation !== this.browserAudioGeneration || streamId !== this.outputStreamId) return
+              if (this.hello?.client.playbackDrainAck === true) {
+                this.send({
+                  type: 'voice.playback-finalize',
+                  serverSeq: this.nextSeq(),
+                  streamId,
+                  lastSequence,
+                })
+              }
+              if (streamId === this.gatedOutputStreamId) {
+                this.schedulePlaybackFallback(streamId, durationMs, startedAt)
+              }
             })
           }
-          if (streamId === this.gatedOutputStreamId && responseId !== undefined) {
-            this.schedulePlaybackFallback(
-              streamId,
-              this.responseAudioDurationMs.get(responseId) ?? 0,
-              this.responseAudioStartedAt.get(responseId) ?? Date.now(),
-            )
-          }
+        } else if (responseId !== undefined) {
+          this.outputPacketizer.discard(responseId)
         }
         if (responseId !== undefined) this.suppressedResponses.delete(responseId)
         if (responseId !== undefined) this.responseStreams.delete(responseId)
+        if (responseId !== undefined) this.responseLastSequences.delete(responseId)
         if (responseId !== undefined) this.responseAudioDurationMs.delete(responseId)
         if (responseId !== undefined) this.responseAudioStartedAt.delete(responseId)
         this.activeResponseId = undefined
@@ -818,11 +846,114 @@ export class VoiceConnection {
     })
   }
 
+  /** Emit one protocol PCM packet and advance the cursor only for that packet. */
+  private emitOutputPacket(responseId: string, payload: Uint8Array, flags = AudioFrameFlags.None): void {
+    if (this.closed || payload.byteLength === 0) return
+    if (payload.byteLength % 2 !== 0) {
+      this.failProviderAudio('provider PCM packet contains an incomplete 16-bit sample')
+      return
+    }
+    if (this.shouldGateInputDuringPlayback()) {
+      this.suppressInputDuringPlayback = true
+      this.gatedOutputStreamId = this.outputStreamId
+    }
+    const sequence = this.outputSeq
+    const generation = this.browserAudioGeneration
+    this.responseStreams.set(responseId, this.outputStreamId)
+    this.responseLastSequences.set(responseId, sequence)
+    const frame = encodeAudioFrame(
+      AudioFrameKind.ServerOutput,
+      this.outputStreamId,
+      sequence,
+      payload,
+      { ptsMs: Math.round(this.outputPtsMs), flags },
+    )
+    this.outputSeq += 1
+    this.outputPtsMs += payload.byteLength / 2 / OUTPUT_SAMPLE_RATE * 1000
+    this.persistOutputCursor()
+    this.enqueueBrowserAudio(frame, generation)
+    this.sendState('speaking')
+  }
+
+  /** Serialize binary sends so response finalization cannot overtake PCM. */
+  private enqueueBrowserAudio(frame: ArrayBuffer, generation: number): void {
+    if (this.closed) return
+    this.queuedBrowserAudioBytes += frame.byteLength
+    if (this.queuedBrowserAudioBytes > MAX_BROWSER_AUDIO_BUFFERED_BYTES) {
+      this.queuedBrowserAudioBytes -= frame.byteLength
+      this.failBrowserAudio(new Error('ordered browser audio queue exceeded 4 MiB'))
+      return
+    }
+    const task = this.browserAudioSendTail.then(async () => {
+      if (this.closed || generation !== this.browserAudioGeneration) return
+      await this.sendBrowserAudioFrame(frame)
+    }).finally(() => {
+      this.queuedBrowserAudioBytes -= frame.byteLength
+    })
+    this.browserAudioSendTail = task.catch((error: unknown) => {
+      this.failBrowserAudio(error)
+    })
+  }
+
+  private async sendBrowserAudioFrame(frame: ArrayBuffer): Promise<void> {
+    if (this.socket.readyState !== this.socket.OPEN) throw new Error('client WebSocket closed before PCM delivery')
+    if ((this.socket.bufferedAmount ?? 0) > MAX_BROWSER_AUDIO_BUFFERED_BYTES) {
+      throw new Error('client WebSocket buffered audio exceeded 4 MiB')
+    }
+    await new Promise<void>((resolve, reject) => {
+      let settled = false
+      const finish = (error?: Error): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timeout)
+        if (error === undefined) resolve()
+        else reject(error)
+      }
+      const timeout = setTimeout(
+        () => finish(new Error('client WebSocket PCM send timed out')),
+        BROWSER_AUDIO_SEND_TIMEOUT_MS,
+      )
+      try {
+        this.socket.send(frame, { binary: true }, (error) => {
+          if (isWebSocketSendError(error)) finish(error)
+          else finish()
+        })
+      } catch (error) {
+        finish(error instanceof Error ? error : new Error(String(error)))
+      }
+    })
+  }
+
+  private failBrowserAudio(error: unknown): void {
+    if (this.closed || this.browserAudioTransportFailed) return
+    this.browserAudioTransportFailed = true
+    this.fail(
+      'browser-audio-backpressure',
+      `下行语音传输失控，正在通过可恢复连接重试：${error instanceof Error ? error.message : String(error)}`,
+      true,
+    )
+    this.browserAudioGeneration += 1
+    this.outputPacketizer.clear()
+    this.outputStreamId += 1
+    this.outputSeq = 0
+    this.outputPtsMs = 0
+    this.persistOutputCursor()
+    this.dispose('browser-audio-send-failed')
+  }
+
+  private failProviderAudio(message: string): void {
+    if (this.closed) return
+    this.fail('provider-audio-protocol-error', `实时语音供应端返回了无效 PCM：${message}`, true)
+    this.dispose('provider-disconnected')
+  }
+
   private clearPlayback(reason: 'barge-in' | 'cancelled'): void {
     if (this.playbackDrainFallbackTimer !== undefined) clearTimeout(this.playbackDrainFallbackTimer)
     this.playbackDrainFallbackTimer = undefined
     this.suppressInputDuringPlayback = false
     this.gatedOutputStreamId = undefined
+    this.browserAudioGeneration += 1
+    this.outputPacketizer.clear()
     this.outputStreamId += 1
     this.outputSeq = 0
     this.outputPtsMs = 0
@@ -831,11 +962,13 @@ export class VoiceConnection {
   }
 
   private shouldGateInputDuringPlayback(): boolean {
-    return this.hello !== undefined && this.hello.client.duplex !== 'full'
+    return this.hello !== undefined
+      && this.hello.client.duplex !== 'full'
+      && this.hello.client.echoControl !== 'client-filtered-preroll'
   }
 
   /**
-   * Older V1 clients do not send playback-drained. Estimate the
+   * V1 clients that do not acknowledge playback drain use an estimate of the
    * remaining local queue from delivered PCM and release with a safety margin,
    * so compatibility mode can reduce echo without ever permanently muting mic.
    */
@@ -928,7 +1061,7 @@ export class VoiceConnection {
   }
 }
 
-function validateAudioNegotiation(hello: VoiceHello): void {
+export function validateAudioNegotiation(hello: VoiceHello): void {
   if (hello.audio.input.encoding !== 'pcm_s16le'
     || hello.audio.input.sampleRate !== INPUT_SAMPLE_RATE
     || hello.audio.input.channels !== AUDIO_CHANNELS) {
@@ -936,8 +1069,32 @@ function validateAudioNegotiation(hello: VoiceHello): void {
   }
   if (hello.audio.output.encoding !== 'pcm_s16le'
     || hello.audio.output.sampleRate !== OUTPUT_SAMPLE_RATE
-    || hello.audio.output.channels !== AUDIO_CHANNELS) {
-    throw new Error('V1 output requires PCM s16le, 24 kHz, mono')
+    || hello.audio.output.channels !== AUDIO_CHANNELS
+    || hello.audio.output.frameDurationMs !== OUTPUT_FRAME_DURATION_MS) {
+    throw new Error('V1 output requires PCM s16le, 24 kHz, mono, 40 ms packets')
+  }
+  if (hello.client.echoControl === 'client-filtered-preroll'
+    && (hello.client.duplex !== 'best-effort' || hello.client.playbackDrainAck !== true)) {
+    throw new Error('client-filtered-preroll requires best-effort duplex and playback drain acknowledgement')
+  }
+}
+
+/** Deterministic negotiated PCM contract; input cadence belongs to the client. */
+export function negotiateVoiceAudio(hello: VoiceHello, maxBinaryFrameBytes: number): VoiceReady['audio'] {
+  return {
+    input: {
+      encoding: 'pcm_s16le',
+      sampleRate: INPUT_SAMPLE_RATE,
+      channels: AUDIO_CHANNELS,
+      frameDurationMs: hello.audio.input.frameDurationMs,
+    },
+    output: {
+      encoding: 'pcm_s16le',
+      sampleRate: OUTPUT_SAMPLE_RATE,
+      channels: AUDIO_CHANNELS,
+      frameDurationMs: OUTPUT_FRAME_DURATION_MS,
+    },
+    maxBinaryFrameBytes,
   }
 }
 
@@ -949,6 +1106,7 @@ export function negotiateVoiceCapabilities(hello: VoiceHello): VoiceReady['capab
     reconnect: true,
     persistentAgentTask: true,
     playbackDrainAck: hello.client.playbackDrainAck === true,
+    echoControl: hello.client.echoControl ?? 'host-gated',
   }
 }
 
@@ -962,6 +1120,7 @@ function isTransientDisconnect(reason: string): boolean {
   return reason === 'client-disconnected'
     || reason === 'client-error'
     || reason === 'provider-disconnected'
+    || reason === 'provider-input-backpressure'
     || reason === 'browser-audio-send-failed'
 }
 

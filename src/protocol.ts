@@ -4,16 +4,20 @@ export const VOICE_PROTOCOL = 'dsh.voice.v1' as const
 export const VOICE_PROTOCOL_VERSION = 1 as const
 export const VOICE_ROUTE = '/plugins/realtime-voice/v1' as const
 export const VOICE_STATUS_ROUTE = '/plugins/realtime-voice/v1/status' as const
-export const VOICE_WEB_CLIENT_VERSION = '0.1.0-alpha.9-research.3' as const
+export const VOICE_WEB_CLIENT_VERSION = '0.1.0-alpha.9-research.4' as const
 
 export const INPUT_SAMPLE_RATE = 16_000 as const
 export const OUTPUT_SAMPLE_RATE = 24_000 as const
 export const AUDIO_CHANNELS = 1 as const
+export const OUTPUT_FRAME_DURATION_MS = 40 as const
+export const PCM_SAMPLE_BYTES = 2 as const
+export const OUTPUT_FRAME_BYTES = OUTPUT_SAMPLE_RATE * AUDIO_CHANNELS * PCM_SAMPLE_BYTES * OUTPUT_FRAME_DURATION_MS / 1000
 
 const AUDIO_MAGIC = [0x44, 0x53, 0x56, 0x31] as const // ASCII "DSV1"
 export const AUDIO_HEADER_BYTES = 24 as const
 
 export type VoiceClientPlatform = 'web' | 'wechat-mini-program' | 'ios' | 'android' | 'unknown'
+export type VoiceEchoControl = 'host-gated' | 'client-filtered-preroll'
 export type VoicePhase =
   | 'connecting'
   | 'listening'
@@ -45,6 +49,8 @@ export interface VoiceHello {
     duplex: 'full' | 'best-effort' | 'turn-based'
     /** Whether this transport can ACK after its actual local player queue drains. */
     playbackDrainAck?: boolean
+    /** Absence is backward-compatible host-gated echo control. */
+    echoControl?: VoiceEchoControl
   }
   target: { sessionId: string }
   audio: {
@@ -116,6 +122,7 @@ export interface VoiceReady {
     reconnect: true
     persistentAgentTask: true
     playbackDrainAck: boolean
+    echoControl: VoiceEchoControl
   }
 }
 
@@ -303,6 +310,7 @@ export function isVoiceClientControl(value: unknown): value is VoiceClientContro
     && typeof client.foregroundOnly === 'boolean'
     && (client.duplex === 'full' || client.duplex === 'best-effort' || client.duplex === 'turn-based')
     && (client.playbackDrainAck === undefined || typeof client.playbackDrainAck === 'boolean')
+    && (client.echoControl === undefined || client.echoControl === 'host-gated' || client.echoControl === 'client-filtered-preroll')
     && typeof target?.sessionId === 'string'
     && target.sessionId.length > 0
     && target.sessionId.length <= 256

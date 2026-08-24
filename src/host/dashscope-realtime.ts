@@ -1,6 +1,8 @@
 import WebSocket, { type ClientOptions } from 'ws'
 import type { VoiceConfig } from './config.ts'
 
+const MAX_PROVIDER_AUDIO_BUFFERED_BYTES = 4 * 1024 * 1024
+
 export interface DashScopeRealtimeCallbacks {
   onEvent: (event: DashScopeServerEvent) => void
 }
@@ -128,6 +130,13 @@ export class DashScopeRealtime {
   }
 
   appendAudio(pcm: Uint8Array): void {
+    if (pcm.byteLength === 0 || pcm.byteLength % 2 !== 0) {
+      throw new Error('DashScope input PCM must contain complete 16-bit samples')
+    }
+    if (this.socket?.readyState !== WebSocket.OPEN) throw new Error('DashScope realtime socket is not open')
+    if (this.socket.bufferedAmount > MAX_PROVIDER_AUDIO_BUFFERED_BYTES) {
+      throw new Error('DashScope input audio buffer exceeded 4 MiB')
+    }
     this.send({ type: 'input_audio_buffer.append', audio: Buffer.from(pcm).toString('base64') })
   }
 

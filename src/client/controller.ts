@@ -404,15 +404,25 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
 
   private sendAudio(pcm: ArrayBuffer): void {
     const socket = this.socket
-    if (!this.providerReady || socket?.readyState !== WebSocket.OPEN || socket.bufferedAmount > 1024 * 1024) return
+    if (!this.providerReady || socket?.readyState !== WebSocket.OPEN) return
+    if (socket.bufferedAmount > 4 * 1024 * 1024) {
+      this.lastReconnectError = '浏览器上行语音缓冲超过 4 MiB，正在重连。'
+      socket.close(4001, 'client-audio-backpressure')
+      return
+    }
     const sequence = this.inputSequence++
-    socket.send(encodeAudioFrame(
-      AudioFrameKind.ClientInput,
-      this.inputStreamId,
-      sequence,
-      pcm,
-      { ptsMs: sequence * 40 },
-    ))
+    try {
+      socket.send(encodeAudioFrame(
+        AudioFrameKind.ClientInput,
+        this.inputStreamId,
+        sequence,
+        pcm,
+        { ptsMs: sequence * 40 },
+      ))
+    } catch (error) {
+      this.lastReconnectError = error instanceof Error ? error.message : String(error)
+      socket.close(4001, 'client-audio-send-failed')
+    }
   }
 
   private sendControl(message: object): void {

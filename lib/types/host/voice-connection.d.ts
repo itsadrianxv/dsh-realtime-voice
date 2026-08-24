@@ -25,13 +25,19 @@ export declare class VoiceConnection {
     private session;
     private coordinator;
     private activeResponseId;
-    /** Non-full-duplex clients gate upstream PCM during downlink playback. An
-     * explicit barge-in or negotiated local playback drain re-opens it. */
+    /** Compatibility gate for clients that did not negotiate local correlated
+     * echo filtering. Capable clients keep forwarding near-end speech/pre-roll. */
     private suppressInputDuringPlayback;
     private gatedOutputStreamId;
     private readonly responseStreams;
+    private readonly responseLastSequences;
     private readonly responseAudioDurationMs;
     private readonly responseAudioStartedAt;
+    private readonly outputPacketizer;
+    private browserAudioSendTail;
+    private browserAudioGeneration;
+    private queuedBrowserAudioBytes;
+    private browserAudioTransportFailed;
     private playbackDrainFallbackTimer;
     private readonly suppressedResponses;
     private readonly handledFunctionCalls;
@@ -64,10 +70,17 @@ export declare class VoiceConnection {
     private answerQuestion;
     private sendApproval;
     private sendQuestion;
+    /** Emit one protocol PCM packet and advance the cursor only for that packet. */
+    private emitOutputPacket;
+    /** Serialize binary sends so response finalization cannot overtake PCM. */
+    private enqueueBrowserAudio;
+    private sendBrowserAudioFrame;
+    private failBrowserAudio;
+    private failProviderAudio;
     private clearPlayback;
     private shouldGateInputDuringPlayback;
     /**
-     * Older V1 clients do not send playback-drained. Estimate the
+     * V1 clients that do not acknowledge playback drain use an estimate of the
      * remaining local queue from delivered PCM and release with a safety margin,
      * so compatibility mode can reduce echo without ever permanently muting mic.
      */
@@ -84,6 +97,9 @@ export declare class VoiceConnection {
     private persistOutputCursor;
     private rpcId;
 }
+export declare function validateAudioNegotiation(hello: VoiceHello): void;
+/** Deterministic negotiated PCM contract; input cadence belongs to the client. */
+export declare function negotiateVoiceAudio(hello: VoiceHello, maxBinaryFrameBytes: number): VoiceReady['audio'];
 /** Deterministic, platform-neutral hello → ready capability negotiation. */
 export declare function negotiateVoiceCapabilities(hello: VoiceHello): VoiceReady['capabilities'];
 export declare function buildInstructions(status: {

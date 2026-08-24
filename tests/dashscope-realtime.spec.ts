@@ -29,6 +29,7 @@ const tools: readonly RealtimeFunctionTool[] = [{
 
 class FakeSocket extends EventEmitter {
   readyState = WebSocket.OPEN
+  bufferedAmount = 0
   sent: Array<Record<string, unknown>> = []
 
   send(raw: string): void {
@@ -169,6 +170,35 @@ describe('DashScope realtime provider', () => {
     const provider = createProvider(socket, config, () => { throw new Error('browser socket disappeared') })
     await provider.connect()
     expect(() => socket.event({ type: 'response.audio.delta', delta: 'AA==' })).not.toThrow()
+    provider.close()
+  })
+
+  it('forwards every accepted upstream PCM frame once, in order, without implicit throttling', async () => {
+    const socket = new FakeSocket()
+    const provider = createProvider(socket)
+    await provider.connect()
+    const frames = [
+      new Uint8Array([1, 0]),
+      new Uint8Array([2, 0, 3, 0, 4, 0]),
+      new Uint8Array(2_048).fill(7),
+    ]
+
+    for (const frame of frames) provider.appendAudio(frame)
+
+    const appends = socket.sent.filter(message => message.type === 'input_audio_buffer.append')
+    expect(appends).toHaveLength(frames.length)
+    expect(appends.map(message => Buffer.from(message.audio as string, 'base64'))).toEqual(frames.map(Buffer.from))
+    provider.close()
+  })
+
+  it('throws an explicit recoverable transport signal instead of silently dropping runaway upstream audio', async () => {
+    const socket = new FakeSocket()
+    const provider = createProvider(socket)
+    await provider.connect()
+    socket.bufferedAmount = 5 * 1024 * 1024
+
+    expect(() => provider.appendAudio(new Uint8Array([1, 0]))).toThrow(/exceeded 4 MiB/)
+    expect(socket.sent.filter(message => message.type === 'input_audio_buffer.append')).toHaveLength(0)
     provider.close()
   })
 })

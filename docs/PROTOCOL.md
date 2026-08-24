@@ -9,7 +9,10 @@
 - Binary frames carry audio with a fixed 24-byte, network-byte-order header. The payload remains codec-native (PCM samples are little-endian).
 - Client audio is PCM signed 16-bit little-endian, 16 kHz, mono.
 - Server audio is PCM signed 16-bit little-endian, 24 kHz, mono.
+- The Host echoes the client's declared input `frameDurationMs` in `voice.ready`; V1 does not rewrite a valid 32ms input cadence to 40ms. Server output uses 40ms packets: each normal packet is 1,920 bytes, and one final shorter even-byte packet may carry `end-of-stream` before finalization.
 - WebSocket ordering is authoritative. `streamId` invalidates audio queued before barge-in or recorder rotation; `sequence`, `ptsMs`, and `payloadLength` support gap detection and jitter buffering on every client.
+- DashScope delta boundaries are not protocol packet boundaries. The Host keeps a response-scoped remainder, emits sequence/PTS only for actual outgoing packets, flushes the final complete-sample tail, waits for every WebSocket send callback, and only then sends `voice.playback-finalize`. Cancel, playback clear, disconnect, and disposal invalidate queued packets and discard old remainders.
+- Ordinary transport jitter is absorbed by an ordered queue. A queue or socket buffer above 4 MiB, a 15-second binary send timeout, or an upstream DashScope buffer above 4 MiB is an explicit recoverable transport failure; no accepted PCM is silently dropped while the call pretends to remain healthy.
 
 ### Binary header
 
@@ -46,14 +49,17 @@ The Host answers the original DSH mux `rpcId`; it does not translate the user's 
 
 ## Duplex and playback capability negotiation
 
-`voice.hello.client.duplex` describes the client audio path, not its platform:
+`voice.hello.client.duplex` and `voice.hello.client.echoControl` describe the client audio path, not its platform:
 
 - `full`: the client provides effective acoustic echo cancellation and keeps upstream PCM open during downlink audio.
-- `best-effort` or `turn-based`: the Host gates upstream PCM while forwarded downlink audio may still be audible. Local onset detection may stop playback and send `voice.cancel-response`, which immediately clears playback and reopens upstream; late packets from the cancelled provider response are discarded and cannot close the gate again.
+- `best-effort` or `turn-based` with absent `echoControl` (negotiated as `host-gated`): the Host applies the backward-compatible upstream gate while forwarded downlink audio may still be audible. Local onset detection may stop playback and send `voice.cancel-response`, which immediately clears playback and reopens upstream; late packets from the cancelled provider response are discarded and cannot close the gate again.
+- `best-effort` with `echoControl: client-filtered-preroll`: the client has correlated microphone input with its own playback reference, drops pure echo locally, and sends `voice.cancel-response` followed by retained near-end pre-roll PCM on the same ordered WebSocket. This declaration also requires `playbackDrainAck: true`. The Host does not apply a second playback gate, so the first real speech frame after cancel is forwarded to the provider. Pure echo causes no self-interruption because the client uploads neither cancel nor PCM for that path.
+
+Absence of `echoControl` always negotiates to `voice.ready.capabilities.echoControl: host-gated`; existing V1 clients therefore keep their previous bounded behavior. The Host never infers an echo policy from `platform`. WebUI, WeChat, iOS, and Android obtain identical behavior for identical capability declarations.
 
 `voice.hello.client.playbackDrainAck` is an optional V1 capability. Absence means `false`. `voice.ready.capabilities.playbackDrainAck` returns the negotiated value:
 
-- When `true`, after the provider finishes sending one audible response the Host emits `voice.playback-finalize { streamId, lastSequence }`. The client waits until its real local player queue for that exact stream is empty, then sends `voice.playback-drained { streamId }`. Only a matching stream can release its gate.
+- When `true`, after the provider finishes sending one audible response and all its binary PCM sends have completed, the Host emits `voice.playback-finalize { streamId, lastSequence }`. The client waits until its real local player queue for that exact stream is empty, then sends `voice.playback-drained { streamId }`. Only a matching stream can release its gate.
 - When absent or `false`, the Host does not send `voice.playback-finalize` and does not require an ACK. It releases the gate after a bounded compatibility interval derived from delivered PCM duration plus a 1.5-second safety margin.
 - If a negotiated ACK is lost, the same bounded interval is the safety fallback, so no client can be permanently muted.
 - `voice.playback-clear` invalidates all older stream ids immediately. It also cancels any pending drain wait; an ACK for an invalidated stream has no effect.
@@ -64,6 +70,6 @@ This is one client-neutral state machine. WebUI, a Mini Program, iOS, Android, a
 
 V1 requires a Mini Program client to provide binary WebSocket frames and 16 kHz mono PCM recording. Because WeChat does not document one universal PCM bit layout across every device, a real-device probe must confirm signed 16-bit little-endian samples before the client sends `pcmS16leVerified: true`. The hello capability exchange fails loud if the runtime cannot meet that contract.
 
-Playback uses `wx.createWebAudioContext` (base library 2.19.0 or later) and implements the shared drain protocol above. The Mini Program declares `playbackDrainAck: true` only when it can observe its actual local player queue; it returns `voice.playback-drained` only after the finalized stream is truly empty. `RecorderManager` has a finite recording duration, so a recorder rotation starts a new input `streamId` with the discontinuity flag; the Agent task remains in DSH throughout. Production access requires the existing authenticated remote gateway, a configured WSS request domain, TLS, and the Mini Program network-domain requirements—never a DashScope key in the Mini Program.
+Playback uses `wx.createWebAudioContext` (base library 2.19.0 or later) and implements the shared drain protocol above. The Mini Program declares `playbackDrainAck: true` only when it can observe its actual local player queue; it returns `voice.playback-drained` only after the finalized stream is truly empty. A Mini Program may declare `echoControl: client-filtered-preroll` only when its real-device implementation correlates playback reference audio, suppresses pure echo locally, and preserves the ordered cancel-then-pre-roll sequence. `RecorderManager` has a finite recording duration, so a recorder rotation starts a new input `streamId` with the discontinuity flag; the Agent task remains in DSH throughout. Production access requires the existing authenticated remote gateway, a configured WSS request domain, TLS, and the Mini Program network-domain requirements—never a DashScope key in the Mini Program.
 
 V1 is foreground real-time voice. Background/lock-screen continuous recording, guaranteed full duplex on every device, and uniform platform echo cancellation are deliberately not promised. The Mini Program declares `duplex: best-effort` or `turn-based`; on `App.onHide` it may close the voice socket, while the pinned DSH task continues. `App.onShow` reconnects and obtains current task state from DSH. MP3 fallback and additional codecs may be added through a future negotiated protocol version without changing DSH tool semantics.

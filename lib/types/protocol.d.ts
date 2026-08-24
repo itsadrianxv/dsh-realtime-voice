@@ -3,12 +3,16 @@ export declare const VOICE_PROTOCOL: "dsh.voice.v1";
 export declare const VOICE_PROTOCOL_VERSION: 1;
 export declare const VOICE_ROUTE: "/plugins/realtime-voice/v1";
 export declare const VOICE_STATUS_ROUTE: "/plugins/realtime-voice/v1/status";
-export declare const VOICE_WEB_CLIENT_VERSION: "0.1.0-alpha.9-research.3";
+export declare const VOICE_WEB_CLIENT_VERSION: "0.1.0-alpha.9-research.4";
 export declare const INPUT_SAMPLE_RATE: 16000;
 export declare const OUTPUT_SAMPLE_RATE: 24000;
 export declare const AUDIO_CHANNELS: 1;
+export declare const OUTPUT_FRAME_DURATION_MS: 40;
+export declare const PCM_SAMPLE_BYTES: 2;
+export declare const OUTPUT_FRAME_BYTES: number;
 export declare const AUDIO_HEADER_BYTES: 24;
 export type VoiceClientPlatform = 'web' | 'wechat-mini-program' | 'ios' | 'android' | 'unknown';
+export type VoiceEchoControl = 'host-gated' | 'client-filtered-preroll';
 export type VoicePhase = 'connecting' | 'listening' | 'thinking' | 'agent-working' | 'speaking' | 'reconnecting' | 'ending';
 export interface PcmAudioSpec {
     encoding: 'pcm_s16le';
@@ -31,6 +35,8 @@ export interface VoiceHello {
         duplex: 'full' | 'best-effort' | 'turn-based';
         /** Whether this transport can ACK after its actual local player queue drains. */
         playbackDrainAck?: boolean;
+        /** Absence is backward-compatible host-gated echo control. */
+        echoControl?: VoiceEchoControl;
     };
     target: {
         sessionId: string;
@@ -119,6 +125,7 @@ export interface VoiceReady {
         reconnect: true;
         persistentAgentTask: true;
         playbackDrainAck: boolean;
+        echoControl: VoiceEchoControl;
     };
 }
 export interface VoiceOccupancyOwner {

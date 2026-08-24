@@ -10,8 +10,11 @@ class FakeBrowserSocket extends EventEmitter {
   readyState = this.OPEN
   readonly sent: unknown[] = []
 
-  send(value: unknown): void {
+  bufferedAmount = 0
+
+  send(value: unknown, _options?: unknown, callback?: (error?: Error) => void): void {
     this.sent.push(value)
+    callback?.()
   }
 
   close(): void {
@@ -42,11 +45,19 @@ describe('full-duplex barge-in', () => {
           output: { encoding: 'pcm_s16le', sampleRate: 24_000, channels: 1, frameDurationMs: 40 },
         },
       } as const
-      expect(negotiateVoiceCapabilities(base)).toMatchObject({ playbackDrainAck: false, bargeIn: true })
+      expect(negotiateVoiceCapabilities(base)).toMatchObject({
+        playbackDrainAck: false,
+        bargeIn: true,
+        echoControl: 'host-gated',
+      })
       expect(negotiateVoiceCapabilities({
         ...base,
-        client: { ...base.client, playbackDrainAck: true },
-      })).toMatchObject({ playbackDrainAck: true, bargeIn: true })
+        client: {
+          ...base.client,
+          playbackDrainAck: true,
+          echoControl: 'client-filtered-preroll',
+        },
+      })).toMatchObject({ playbackDrainAck: true, bargeIn: true, echoControl: 'client-filtered-preroll' })
     },
   )
 
@@ -73,7 +84,11 @@ describe('full-duplex barge-in', () => {
     internal.provider = { cancelResponse: vi.fn(), close: vi.fn(), appendAudio }
     internal.activeResponseId = 'response-one'
 
-    internal.onProviderEvent({ type: 'response.audio.delta', response_id: 'response-one', delta: 'AAAA' })
+    internal.onProviderEvent({
+      type: 'response.audio.delta',
+      response_id: 'response-one',
+      delta: Buffer.alloc(1_920).toString('base64'),
+    })
     expect(internal.suppressInputDuringPlayback).toBe(true)
 
     internal.interruptActiveResponse('cancelled', true)
@@ -113,13 +128,19 @@ describe('full-duplex barge-in', () => {
     internal.provider = { cancelResponse: vi.fn(), close: vi.fn() }
     internal.activeResponseId = 'response-one'
 
-    internal.onProviderEvent({ type: 'response.audio.delta', response_id: 'response-one', delta: 'AAAA' })
-    internal.onProviderEvent({ type: 'response.done', response: { id: 'response-one' } })
-    expect(internal.suppressInputDuringPlayback).toBe(true)
-    expect(internal.gatedOutputStreamId).toBe(1)
-    expect(socket.sent.filter(value => typeof value === 'string').map(value => JSON.parse(value as string))).toContainEqual(
-      expect.objectContaining({ type: 'voice.playback-finalize', streamId: 1 }),
-    )
+      internal.onProviderEvent({
+        type: 'response.audio.delta',
+        response_id: 'response-one',
+        delta: Buffer.alloc(1_920).toString('base64'),
+      })
+      internal.onProviderEvent({ type: 'response.done', response: { id: 'response-one' } })
+      expect(internal.suppressInputDuringPlayback).toBe(true)
+      expect(internal.gatedOutputStreamId).toBe(1)
+      await vi.waitFor(() => {
+        expect(socket.sent.filter(value => typeof value === 'string').map(value => JSON.parse(value as string))).toContainEqual(
+          expect.objectContaining({ type: 'voice.playback-finalize', streamId: 1 }),
+        )
+      })
 
     await internal.receive(Buffer.from(JSON.stringify({ type: 'voice.playback-drained', streamId: 1 })), false)
     expect(internal.suppressInputDuringPlayback).toBe(false)
@@ -154,7 +175,7 @@ describe('full-duplex barge-in', () => {
 
   it.each(['web', 'wechat-mini-program'] as const)(
     'uses the same bounded no-ACK fallback for %s when playbackDrainAck is undeclared',
-    (platform) => {
+    async (platform) => {
     vi.useFakeTimers()
     try {
       const socket = new FakeBrowserSocket()
@@ -176,13 +197,17 @@ describe('full-duplex barge-in', () => {
       internal.provider = { close: vi.fn() }
       internal.activeResponseId = 'legacy-response'
 
-      internal.onProviderEvent({ type: 'response.audio.delta', response_id: 'legacy-response', delta: 'AAAA' })
+      internal.onProviderEvent({
+        type: 'response.audio.delta',
+        response_id: 'legacy-response',
+        delta: Buffer.alloc(1_920).toString('base64'),
+      })
       internal.onProviderEvent({ type: 'response.done', response: { id: 'legacy-response' } })
       expect(internal.suppressInputDuringPlayback).toBe(true)
       expect(socket.sent.filter(value => typeof value === 'string').map(value => JSON.parse(value as string))).not.toContainEqual(
         expect.objectContaining({ type: 'voice.playback-finalize' }),
       )
-      vi.advanceTimersByTime(1_600)
+      await vi.advanceTimersByTimeAsync(1_600)
       expect(internal.suppressInputDuringPlayback).toBe(false)
       connection.dispose()
     } finally {
@@ -245,6 +270,90 @@ describe('full-duplex barge-in', () => {
     internal.interruptActiveResponse('cancelled', true)
 
     expect(cancelResponse).toHaveBeenCalledTimes(1)
+    connection.dispose()
+  })
+
+  it.each(['web', 'wechat-mini-program'] as const)(
+    'forwards cancel-then-pre-roll without swallowing the first frame for a locally filtered %s client',
+    async (platform) => {
+      const socket = new FakeBrowserSocket()
+      const connection = new VoiceConnection(
+        { logger: { warn: vi.fn() } } as never,
+        socket as never,
+        {} as never,
+        new Config({}),
+        vi.fn(),
+      )
+      const appendAudio = vi.fn()
+      const cancelResponse = vi.fn()
+      const internal = connection as unknown as {
+        hello: { client: { platform: string; duplex: string; playbackDrainAck: boolean; echoControl: string } }
+        provider: { cancelResponse(): void; close(): void; appendAudio(value: Uint8Array): void }
+        activeResponseId: string
+        suppressInputDuringPlayback: boolean
+        onProviderEvent(event: Record<string, unknown>): void
+        receive(value: Buffer | ArrayBuffer, binary: boolean): Promise<void>
+      }
+      internal.hello = {
+        client: {
+          platform,
+          duplex: 'best-effort',
+          playbackDrainAck: true,
+          echoControl: 'client-filtered-preroll',
+        },
+      }
+      internal.provider = { cancelResponse, close: vi.fn(), appendAudio }
+      internal.activeResponseId = 'response-one'
+
+      internal.onProviderEvent({
+        type: 'response.audio.delta',
+        response_id: 'response-one',
+        delta: Buffer.alloc(1_920, 7).toString('base64'),
+      })
+      expect(internal.suppressInputDuringPlayback).toBe(false)
+
+      await internal.receive(Buffer.from(JSON.stringify({ type: 'voice.cancel-response' })), false)
+      const preRoll = new Uint8Array([2, 0, 4, 0, 6, 0])
+      await internal.receive(encodeAudioFrame(AudioFrameKind.ClientInput, 9, 0, preRoll), true)
+
+      expect(cancelResponse).toHaveBeenCalledTimes(1)
+      expect(appendAudio).toHaveBeenCalledTimes(1)
+      expect([...appendAudio.mock.calls[0]![0] as Uint8Array]).toEqual([...preRoll])
+      connection.dispose()
+    },
+  )
+
+  it('does not self-interrupt when a locally filtered client uploads no pure playback echo', () => {
+    const socket = new FakeBrowserSocket()
+    const connection = new VoiceConnection(
+      { logger: { warn: vi.fn() } } as never,
+      socket as never,
+      {} as never,
+      new Config({}),
+      vi.fn(),
+    )
+    const appendAudio = vi.fn()
+    const cancelResponse = vi.fn()
+    const internal = connection as unknown as {
+      hello: { client: { duplex: string; playbackDrainAck: boolean; echoControl: string } }
+      provider: { cancelResponse(): void; close(): void; appendAudio(value: Uint8Array): void }
+      activeResponseId: string
+      onProviderEvent(event: Record<string, unknown>): void
+    }
+    internal.hello = {
+      client: { duplex: 'best-effort', playbackDrainAck: true, echoControl: 'client-filtered-preroll' },
+    }
+    internal.provider = { cancelResponse, close: vi.fn(), appendAudio }
+    internal.activeResponseId = 'response-one'
+
+    internal.onProviderEvent({
+      type: 'response.audio.delta',
+      response_id: 'response-one',
+      delta: Buffer.alloc(1_920, 3).toString('base64'),
+    })
+
+    expect(cancelResponse).not.toHaveBeenCalled()
+    expect(appendAudio).not.toHaveBeenCalled()
     connection.dispose()
   })
 })

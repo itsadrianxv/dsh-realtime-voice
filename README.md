@@ -2,7 +2,7 @@
 
 DeepSeek Harness 官方插件形态的实时语音 Agent：安装后在 WebUI 输入框旁出现拨打按钮，用户可持续对话、打断播报、询问进度，并用语音启动、追加、纠正或停止当前 DSH Agent 工作。
 
-当前研究版本：`0.1.0-alpha.9-research.3`，目标 DSH：`0.1.0-rc.7`。该版本位于独立研究分支，不替换已发布的 `alpha.8`。
+当前研究版本：`0.1.0-alpha.9-research.4`，目标 DSH：`0.1.0-rc.7`。该版本位于独立研究分支，不替换已发布的 `alpha.8`。
 
 本包同时声明 DSH bundle、Host 插件和“原生 WebUI 浏览器侧”插件。这里不是另做一个网站：UI 直接注入 DSH 自带的 `http://127.0.0.1:3080`，不新增页面或 UI 端口。它不修改 DSH 源码，不另起后台进程；卸载或禁用时会移除 UI/路由并关闭麦克风、音频、浏览器 WebSocket 和百炼连接，已经交给 DSH 的任务继续运行。
 
@@ -21,6 +21,8 @@ DeepSeek Harness 官方插件形态的实时语音 Agent：安装后在 WebUI �
 - 长通话恢复：异常断线为 owner 保留 30 秒原子恢复租约，控制序号、音频 stream/sequence/PTS 跨 transport 单调延续；WebUI 定时心跳并针对百炼 `1007` 限流延长退避，DSH 中已开始的任务始终继续运行
 - DSH credentials 解析 `DASHSCOPE_API_KEY`，密钥不进入浏览器包
 - `dsh.voice.v1` 客户端无关协议：WebUI 与微信小程序共用 hello/ready、播放排空 ACK、24 字节二进制帧、16/24 kHz PCM、打断和恢复契约
+- 客户端无关的回声控制协商：旧 V1 客户端继续由 Host 有界门控；声明“本地相关性滤波 + 有序 pre-roll”的客户端不会再被 Host 重复封麦，打断首音可无损送达百炼
+- 下行 PCM 按响应重组为 24 kHz/mono/s16le 的 40ms（1920 字节）有序帧，短尾帧先送达再 finalize；普通网络抖动排队，真正失控时显式可恢复重连而不静默丢音
 - DSH Host 权威单通话租约：status 只提供非秘密元数据，恢复 token 仅由 owning socket 获得；WebUI/微信同时拨号时只有 Host 原子仲裁的客户端成功
 - WebUI 本地所有权优先：已 ready、正在重连或仍持有本地恢复上下文时，不会被公开 `status.active` 误画成“另一端占用”；新拨号才由 status 预检，最终始终以 Host 的 ready/busy 裁决为准
 
@@ -82,6 +84,8 @@ dsh plugin --profile web remove @harness-remote/dsh-realtime-voice
 - 真实 `ws` 成功回调兼容：首个下行音频包不会被误判为发送失败；助手流式字幕按增量完整拼接
 - 本地起音约 80ms 后先清空播放，Host 对同一响应只取消一次；VAD 云端事件继续作为权威兜底
 - WebUI 与微信同能力下采用相同播放仲裁：本地播放队列排空后 ACK；旧客户端或 ACK 丢失按已发送 PCM 时长有界兜底，不会永久封麦
+- 任意 DashScope delta 分片按字节无损重组，sequence/PTS 按实际发出的 PCM 包递增；取消、清播和连续响应不会串入旧 remainder
+- 新协商的本地回声滤波客户端按同一 WebSocket 顺序发送 `voice.cancel-response` 与 pre-roll PCM，Host 保证首帧上送；未上传的纯播放回声不会触发供应端自我打断
 - 悬浮窗口拖拽坐标自动限制在视口内，窗口缩放与展开/收起时不会丢出屏幕
 - 插件增删前后 28 个现有会话及最新会话 ID 保持一致
 - 协议能力协商、DSH 会话绑定、语义 Function Calling、审批/追问校验、播放排空、打断竞态、断线续接、占用仲裁与 Host 生命周期自动化测试

@@ -24,6 +24,8 @@ describe('voice wire protocol', () => {
         pcmS16leVerified: true,
         foregroundOnly: true,
         duplex: 'best-effort',
+        playbackDrainAck: true,
+        echoControl: 'client-filtered-preroll',
       },
       target: { sessionId: 'session-1' },
       audio: {
@@ -49,6 +51,29 @@ describe('voice wire protocol', () => {
       },
       target: { sessionId: 'session-1' },
       audio: {},
+    })).toBe(false)
+  })
+
+  it('rejects an unknown client echo-control capability', () => {
+    expect(isVoiceClientControl({
+      type: 'voice.hello',
+      protocol: VOICE_PROTOCOL,
+      requestId: 'request-1',
+      client: {
+        platform: 'unknown',
+        version: '1',
+        binaryWebSocket: true,
+        playbackClear: true,
+        pcmS16leVerified: true,
+        foregroundOnly: false,
+        duplex: 'best-effort',
+        echoControl: 'platform-guessed',
+      },
+      target: { sessionId: 'session-1' },
+      audio: {
+        input: { encoding: 'pcm_s16le', sampleRate: 16000, channels: 1, frameDurationMs: 32 },
+        output: { encoding: 'pcm_s16le', sampleRate: 24000, channels: 1, frameDurationMs: 40 },
+      },
     })).toBe(false)
   })
 
