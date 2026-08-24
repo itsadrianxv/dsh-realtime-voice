@@ -1,9 +1,11 @@
 /** Versioned client-neutral wire contract shared by WebUI and WeChat Mini Program clients. */
 export declare const VOICE_PROTOCOL: "dsh.voice.v1";
+export declare const VOICE_DIRECT_PROTOCOL: "dsh.voice.direct.v1";
+export type VoiceControlProtocol = typeof VOICE_PROTOCOL | typeof VOICE_DIRECT_PROTOCOL;
 export declare const VOICE_PROTOCOL_VERSION: 1;
 export declare const VOICE_ROUTE: "/plugins/realtime-voice/v1";
 export declare const VOICE_STATUS_ROUTE: "/plugins/realtime-voice/v1/status";
-export declare const VOICE_WEB_CLIENT_VERSION: "0.1.0-alpha.9-research.4";
+export declare const VOICE_WEB_CLIENT_VERSION: "0.1.0-alpha.9-research.5";
 export declare const INPUT_SAMPLE_RATE: 16000;
 export declare const OUTPUT_SAMPLE_RATE: 24000;
 export declare const AUDIO_CHANNELS: 1;
@@ -129,6 +131,8 @@ export interface VoiceReady {
     };
 }
 export interface VoiceOccupancyOwner {
+    /** Actual owner mode; status.protocol remains the queried route contract. */
+    controlProtocol?: VoiceControlProtocol;
     platform: VoiceClientPlatform;
     clientVersion: string;
     sessionId: string;
@@ -136,7 +140,7 @@ export interface VoiceOccupancyOwner {
     lastSeenAt: number;
 }
 export interface VoiceOccupancyStatus {
-    protocol: typeof VOICE_PROTOCOL;
+    protocol: VoiceControlProtocol;
     active: boolean;
     owner?: VoiceOccupancyOwner;
 }

@@ -24,7 +24,6 @@ import type { VoiceConfig } from './config.ts'
 import {
   DashScopeRealtime,
   type DashScopeServerEvent,
-  type RealtimeFunctionTool,
 } from './dashscope-realtime.ts'
 import {
   DshVoiceCoordinator,
@@ -36,6 +35,9 @@ import { assistantText, DshVoiceSession } from './dsh-session-state.ts'
 import { isWebSocketSendError } from './websocket-send.ts'
 import { ResponsePcmPacketizer } from './pcm-packetizer.ts'
 import { VoiceRuntime, type VoiceContinuityState } from './voice-runtime.ts'
+import { DshFunctionBridge } from './dsh-function-bridge.ts'
+import { buildVoiceInstructions, VOICE_FUNCTION_TOOLS } from './voice-bootstrap.ts'
+
 
 const MAX_BROWSER_AUDIO_BUFFERED_BYTES = 4 * 1024 * 1024
 const BROWSER_AUDIO_SEND_TIMEOUT_MS = 15_000
@@ -70,7 +72,9 @@ export class VoiceConnection {
   private browserAudioTransportFailed = false
   private playbackDrainFallbackTimer: ReturnType<typeof setTimeout> | undefined
   private readonly suppressedResponses = new Set<string>()
-  private readonly handledFunctionCalls = new Set<string>()
+  private readonly handledProviderFunctionCalls = new Set<string>()
+  private readonly providerFunctionScope = randomUUID()
+  private functionBridge: DshFunctionBridge | undefined
   private latestUserTranscript = ''
   private agentWorkPending = false
   private dshTurnRunning = false
@@ -236,6 +240,10 @@ export class VoiceConnection {
     this.dshTurnRunning = status.running
     const coordinator = new DshVoiceCoordinator(this.ctx, hello.target.sessionId, this.continuity.coordinator)
     this.coordinator = coordinator
+    this.functionBridge = new DshFunctionBridge(coordinator, this.continuity.functionReceipts, {
+      onApprovalResolved: (approval, outcome) => this.afterApprovalResolved(approval, outcome),
+      onQuestionResolved: question => this.afterQuestionResolved(question),
+    }, this.continuity.interactionReceipts)
     const credential = await this.ctx.credentials.resolve(credentialRef(this.config.apiKeyEnv))
     if (credential === undefined) {
       this.fail(
@@ -245,8 +253,8 @@ export class VoiceConnection {
       )
       return
     }
-    const instructions = buildInstructions(status, this.continuity)
-    const provider = new DashScopeRealtime(this.config, credential.value, instructions, REALTIME_FUNCTION_TOOLS, {
+    const instructions = buildVoiceInstructions(status, this.continuity)
+    const provider = new DashScopeRealtime(this.config, credential.value, instructions, VOICE_FUNCTION_TOOLS, {
       onEvent: event => this.onProviderEvent(event),
     })
     this.provider = provider
@@ -425,69 +433,31 @@ export class VoiceConnection {
   private async handleFunctionCall(event: DashScopeServerEvent): Promise<void> {
     const callId = field(event, 'call_id')
     const name = field(event, 'name')
-    if (callId === '' || name === '' || this.handledFunctionCalls.has(callId) || this.closed) return
-    this.handledFunctionCalls.add(callId)
+    if (callId === '' || name === '' || this.closed || this.functionBridge === undefined
+      || this.handledProviderFunctionCalls.has(callId)) return
+    // Preserve the legacy provider-socket behavior: a duplicate upstream event
+    // must not create a second function_call_output item. The shared bridge still
+    // supplies continuity-scoped execution idempotency across reconnects.
+    this.handledProviderFunctionCalls.add(callId)
     this.send({ type: 'voice.tool', serverSeq: this.nextSeq(), callId, name, status: 'started' })
-    try {
-      const args = parseArguments(field(event, 'arguments'))
-      let output: unknown
-      switch (name) {
-        case 'handoff_to_dsh_agent': {
-          const instruction = requiredString(args, 'instruction')
-          const handoff = await this.coordinator!.handoff(instruction, this.latestUserTranscript)
-          this.refreshAgentWorkPending()
-          this.sendState('agent-working')
-          this.send({
-            type: 'voice.agent-status',
-            serverSeq: this.nextSeq(),
-            sessionId: handoff.sessionId,
-            running: true,
-            summary: handoff.mode === 'steer' ? '已将补充要求加入正在运行的任务' : 'DSH Agent 已开始执行',
-          })
-          output = {
-            status: 'accepted',
-            handoff_id: handoff.handoffId,
-            target_session_id: handoff.sessionId,
-            mode: handoff.mode,
-          }
-          break
-        }
-        case 'cancel_dsh_agent':
-          output = await this.coordinator!.cancel(optionalString(args, 'reason') ?? '')
-          this.refreshAgentWorkPending()
-          break
-        case 'answer_dsh_approval': {
-          const decision = requiredString(args, 'decision')
-          if (decision !== 'allowed-once' && decision !== 'rejected') {
-            throw new Error('approval decision must be allowed-once or rejected')
-          }
-          output = await this.coordinator!.resolveApproval(requiredString(args, 'approval_id'), decision)
-          break
-        }
-        case 'answer_dsh_question':
-          output = await this.coordinator!.answerQuestion(
-            requiredString(args, 'request_id'),
-            parseQuestionAnswers(args.answers),
-          )
-          break
-        default:
-          throw new Error(`Unknown realtime bridge tool: ${name}`)
-      }
-      this.provider?.completeFunctionCall(callId, output)
-      this.send({
-        type: 'voice.tool',
-        serverSeq: this.nextSeq(),
-        callId,
-        name,
-        status: 'completed',
-        message: 'DSH 已受理。',
-      })
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      this.provider?.completeFunctionCall(callId, { status: 'failed', error: message })
-      this.send({ type: 'voice.tool', serverSeq: this.nextSeq(), callId, name, status: 'failed', message })
-      this.sendState(this.agentWorkPending ? 'agent-working' : 'listening')
-    }
+    const result = await this.functionBridge.execute(
+      callId,
+      name,
+      field(event, 'arguments'),
+      this.latestUserTranscript,
+      this.providerFunctionScope,
+    )
+    this.refreshAgentWorkPending()
+    this.provider?.completeFunctionCall(callId, result.output)
+    this.send({
+      type: 'voice.tool',
+      serverSeq: this.nextSeq(),
+      callId,
+      name,
+      status: result.ok ? 'completed' : 'failed',
+      message: result.ok ? 'DSH 已受理。' : functionErrorMessage(result.output),
+    })
+    this.sendState(this.agentWorkPending ? 'agent-working' : 'listening')
   }
 
   private followDshEvents(sessionId: string): void {
@@ -768,29 +738,31 @@ export class VoiceConnection {
     approvalId: string,
     outcome: 'allowed-once' | 'rejected',
   ): Promise<void> {
-    const pending = this.coordinator?.listPendingApprovals().find(value => value.approvalId === approvalId)
-    if (pending === undefined) throw new Error(`DSH approval is no longer pending: ${approvalId}`)
-    await this.coordinator!.resolveApproval(approvalId, outcome)
-    this.coordinator!.forgetApproval(approvalId)
-    this.sendApproval(pending, 'resolved', outcome)
-    const next = this.coordinator!.listPendingApprovals()[0]
+    if (this.functionBridge === undefined) throw new Error('DSH function bridge is not ready')
+    await this.functionBridge.answerApproval(approvalId, outcome)
+  }
+
+  private async answerQuestion(requestId: string, answers: VoiceQuestionAnswer[]): Promise<void> {
+    if (this.functionBridge === undefined) throw new Error('DSH function bridge is not ready')
+    await this.functionBridge.answerQuestion(requestId, answers)
+  }
+
+  private afterApprovalResolved(approval: PendingVoiceApproval, outcome: 'allowed-once' | 'rejected'): void {
+    this.sendApproval(approval, 'resolved', outcome)
+    const next = this.coordinator?.listPendingApprovals()[0]
     if (next !== undefined) this.sendApproval(next, 'pending')
     this.provider?.announceBackendEvent(
-      `backend_approval_answer_${approvalId}_${outcome}`,
+      `backend_approval_answer_${approval.approvalId}_${outcome}`,
       `[STATUS] 用户已${outcome === 'allowed-once' ? '允许本次操作' : '拒绝本次操作'}，DSH Agent 将继续处理。无需再次询问。`,
     )
   }
 
-  private async answerQuestion(requestId: string, answers: VoiceQuestionAnswer[]): Promise<void> {
-    const pending = this.coordinator?.listPendingQuestions().find(value => value.rpcId === requestId)
-    if (pending === undefined) throw new Error(`DSH question is no longer pending: ${requestId}`)
-    await this.coordinator!.answerQuestion(requestId, answers)
-    this.coordinator!.forgetQuestion(requestId)
-    this.sendQuestion(pending, 'resolved', 'answered')
-    const next = this.coordinator!.listPendingQuestions()[0]
+  private afterQuestionResolved(question: PendingVoiceQuestion): void {
+    this.sendQuestion(question, 'resolved', 'answered')
+    const next = this.coordinator?.listPendingQuestions()[0]
     if (next !== undefined) this.sendQuestion(next, 'pending')
     this.provider?.announceBackendEvent(
-      `backend_question_answer_${requestId}`,
+      `backend_question_answer_${question.rpcId}`,
       '[STATUS] 用户的补充答案已经送回 DSH Agent，任务将继续。无需重复提问。',
     )
   }
@@ -1128,23 +1100,7 @@ export function buildInstructions(
   status: { running: boolean; blank: boolean; cwd?: string; title?: string; summary?: string },
   continuity?: Pick<VoiceContinuityState, 'userTranscript' | 'assistantTranscript'>,
 ): string {
-  return [
-    '你是 DeepSeek Harness 中一个统一助手的实时语音界面。你的首要目标是像自然通话一样快速、简洁地回应，并保持可随时打断。',
-    '你负责低延迟交谈；绑定的 DSH Agent 负责真正执行任务。两者是同一个助手的对话面和执行面，不要向用户讲“后端”“工具路由”或内部实现。',
-    '普通寒暄、解释、简单问答以及只依赖当前对话即可回答的内容，由你立即回答，不调用工具。',
-    '凡是用户要求读取或修改文件、操作应用或设备、运行命令、写代码、查询绑定任务、使用项目上下文、联网研究、打印、发送，或任何需要真实执行和验证的工作，必须调用 handoff_to_dsh_agent。不要只教用户手动操作，也不要声称自己无法访问；让 DSH Agent 先实际尝试。',
-    'handoff_to_dsh_agent 返回 accepted 只代表已受理，绝不代表完成。你可以立即自然确认“我来处理”，保持对话可继续；只有 [BACKEND][COMPLETE] 才能说任务已经完成。',
-    'DSH 工作期间，用户的新约束、纠正或补充仍调用 handoff_to_dsh_agent；宿主会自动把它 steer 进同一正在执行的任务。用户要求停止时调用 cancel_dsh_agent。',
-    '收到 [BACKEND][STATUS] 时，只在有帮助时用一句话播报进展；它不是终态。收到 [BACKEND][COMPLETE]、[FAILED] 或 [CANCELLED] 时，如实、简短播报权威结果，且不要重新提交已经结束的工作。',
-    '收到 [BACKEND][NEEDS_APPROVAL] 时，简短说明要做的操作和风险并询问用户；得到明确同意或拒绝后调用 answer_dsh_approval。收到 [BACKEND][NEEDS_INPUT] 时自然提问，得到答案后调用 answer_dsh_question。此类回答不是新任务。',
-    '如果一句话既包含可立即回答的问题又包含要执行的任务，可以先简短回答，再调用 handoff_to_dsh_agent；不要为了调用工具而长时间沉默。',
-    `当前 DSH 状态：running=${String(status.running)}, blank=${String(status.blank)}.`,
-    status.cwd === undefined ? '' : `当前项目目录：${status.cwd}.`,
-    status.title === undefined ? '' : `当前会话标题：${status.title}.`,
-    status.summary === undefined ? '当前没有可用的最近 Agent 摘要。' : `最近 Agent 内容：${status.summary}`,
-    continuity?.userTranscript === '' || continuity?.userTranscript === undefined ? '' : `断线前用户最后一句：${continuity.userTranscript}`,
-    continuity?.assistantTranscript === '' || continuity?.assistantTranscript === undefined ? '' : `断线前你最后一句：${continuity.assistantTranscript}`,
-  ].filter(Boolean).join('\n')
+  return buildVoiceInstructions(status, continuity)
 }
 
 function field(value: Record<string, unknown>, name: string): string {
@@ -1157,125 +1113,18 @@ function optionalField(value: Record<string, unknown>, name: string): string | u
   return typeof result === 'string' ? result : undefined
 }
 
+function functionErrorMessage(output: unknown): string {
+  if (typeof output !== 'object' || output === null) return 'DSH 语义桥执行失败。'
+  const error = (output as Record<string, unknown>).error
+  return typeof error === 'string' ? error.slice(0, 512) : 'DSH 语义桥执行失败。'
+}
+
 function messageSourceRpcId(value: unknown): string | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   const source = (value as Record<string, unknown>).source
   if (typeof source !== 'object' || source === null) return undefined
   const rpcId = (source as Record<string, unknown>).rpcId
   return typeof rpcId === 'string' && rpcId !== '' ? rpcId : undefined
-}
-
-const REALTIME_FUNCTION_TOOLS: readonly RealtimeFunctionTool[] = [
-  {
-    type: 'function',
-    function: {
-      name: 'handoff_to_dsh_agent',
-      description: '把需要真实执行、访问 DSH 会话/项目/文件/应用/设备/网络或持续 Agent 工作的用户意图交给绑定的 DSH Agent。若 Agent 正在运行，调用会成为同一任务的实时纠正或补充。',
-      parameters: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['instruction'],
-        properties: {
-          instruction: {
-            type: 'string',
-            description: '完整、可执行的用户要求，保留对象、约束、格式和验收条件；不要添加用户没有说过的事实。',
-          },
-        },
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'cancel_dsh_agent',
-      description: '当用户明确要求停止或取消当前绑定的 DSH Agent 工作时调用。',
-      parameters: {
-        type: 'object',
-        additionalProperties: false,
-        properties: { reason: { type: 'string', description: '用户要求取消的原因，可省略。' } },
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'answer_dsh_approval',
-      description: '回答 DSH Agent 正在等待的操作审批。仅在用户已经明确同意或拒绝后调用。',
-      parameters: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['approval_id', 'decision'],
-        properties: {
-          approval_id: { type: 'string' },
-          decision: { type: 'string', enum: ['allowed-once', 'rejected'] },
-        },
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'answer_dsh_question',
-      description: '把用户对 DSH Agent 结构化追问的答案送回原请求。仅用于当前 [NEEDS_INPUT]。',
-      parameters: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['request_id', 'answers'],
-        properties: {
-          request_id: { type: 'string' },
-          answers: {
-            type: 'array',
-            minItems: 1,
-            maxItems: 3,
-            items: {
-              type: 'object',
-              additionalProperties: false,
-              required: ['id', 'selected'],
-              properties: {
-                id: { type: 'string' },
-                selected: { type: 'array', items: { type: 'string' } },
-                custom: { type: 'string' },
-              },
-            },
-          },
-        },
-      },
-    },
-  },
-]
-
-function parseArguments(value: string): Record<string, unknown> {
-  if (value.trim() === '') return {}
-  const parsed: unknown = JSON.parse(value)
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw new Error('Realtime function arguments must be a JSON object')
-  }
-  return parsed as Record<string, unknown>
-}
-
-function requiredString(value: Record<string, unknown>, name: string): string {
-  const result = optionalString(value, name)
-  if (result === undefined || result === '') throw new Error(`Missing realtime function argument: ${name}`)
-  return result
-}
-
-function optionalString(value: Record<string, unknown>, name: string): string | undefined {
-  const result = value[name]
-  return typeof result === 'string' ? result.trim() : undefined
-}
-
-function parseQuestionAnswers(value: unknown): VoiceQuestionAnswer[] {
-  if (!Array.isArray(value) || value.length === 0) throw new Error('Question answers must be a non-empty array')
-  return value.map((item) => {
-    if (typeof item !== 'object' || item === null || Array.isArray(item)) throw new Error('Invalid question answer')
-    const answer = item as Record<string, unknown>
-    const id = requiredString(answer, 'id')
-    if (!Array.isArray(answer.selected) || !answer.selected.every(option => typeof option === 'string')) {
-      throw new Error(`Question answer ${id} has invalid selected options`)
-    }
-    const custom = optionalString(answer, 'custom')
-    return { id, selected: answer.selected.map(option => option.trim()), ...(custom === undefined ? {} : { custom }) }
-  })
 }
 
 function formatQuestions(value: PendingVoiceQuestion): string {

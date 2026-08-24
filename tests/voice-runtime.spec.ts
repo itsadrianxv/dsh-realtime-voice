@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { Config } from '../src/host/config.ts'
 import { VoiceConnection } from '../src/host/voice-connection.ts'
 import { VoiceRuntime } from '../src/host/voice-runtime.ts'
+import { VOICE_DIRECT_PROTOCOL } from '../src/direct-protocol.ts'
 
 class FakeVoiceSocket extends EventEmitter {
   readonly OPEN = 1
@@ -14,6 +15,70 @@ class FakeVoiceSocket extends EventEmitter {
 }
 
 describe('VoiceRuntime authoritative occupancy', () => {
+  it('shares one atomic lease across isolated v1 and direct protocols and rejects cross-protocol resume', () => {
+    const runtime = new VoiceRuntime()
+    const direct = runtime.acquireLease({
+      connectionId: 'direct-owner',
+      protocol: VOICE_DIRECT_PROTOCOL,
+      platform: 'wechat-mini-program',
+      clientVersion: 'direct-test',
+      sessionId: 'session-direct',
+      revoke: vi.fn(),
+    })
+    if (!direct.ok) throw new Error('direct lease was not acquired')
+    expect(runtime.occupancy()).toMatchObject({
+      protocol: 'dsh.voice.v1',
+      active: true,
+      owner: { controlProtocol: VOICE_DIRECT_PROTOCOL },
+    })
+    expect(runtime.acquireLease({
+      connectionId: 'legacy-contender',
+      platform: 'web',
+      clientVersion: 'legacy-test',
+      sessionId: 'session-direct',
+      revoke: vi.fn(),
+    })).toMatchObject({ ok: false, reason: 'busy' })
+
+    runtime.release('direct-owner', true)
+    expect(runtime.acquireLease({
+      connectionId: 'wrong-protocol-resume',
+      platform: 'wechat-mini-program',
+      clientVersion: 'legacy-test',
+      sessionId: 'session-direct',
+      resumeId: direct.state.id,
+      revoke: vi.fn(),
+    })).toMatchObject({ ok: false, reason: 'busy' })
+  })
+
+  it('expires a disconnected direct resume capability after the bounded grace', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-24T00:00:00Z'))
+    try {
+      const runtime = new VoiceRuntime(10 * 60_000, 30_000, 45_000)
+      const direct = runtime.acquireLease({
+        connectionId: 'direct-old',
+        protocol: VOICE_DIRECT_PROTOCOL,
+        platform: 'wechat-mini-program',
+        clientVersion: 'direct-test',
+        sessionId: 'session-direct',
+        revoke: vi.fn(),
+      })
+      if (!direct.ok) throw new Error('direct lease was not acquired')
+      runtime.release('direct-old', true)
+      vi.advanceTimersByTime(30_001)
+      expect(runtime.acquireLease({
+        connectionId: 'direct-too-late',
+        protocol: VOICE_DIRECT_PROTOCOL,
+        platform: 'wechat-mini-program',
+        clientVersion: 'direct-test',
+        sessionId: 'session-direct',
+        resumeId: direct.state.id,
+        revoke: vi.fn(),
+      })).toMatchObject({ ok: false, reason: 'invalid-resume', occupancy: { active: false } })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
   it('releases a pre-ready transport immediately because no client owns its resume token yet', () => {
     const runtime = new VoiceRuntime()
     const socket = new FakeVoiceSocket()

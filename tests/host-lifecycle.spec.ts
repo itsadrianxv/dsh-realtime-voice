@@ -2,9 +2,12 @@ import { describe, expect, it, vi } from 'vitest'
 import { apply } from '../src/index.ts'
 import type { VoiceConfig } from '../src/host/config.ts'
 import { VOICE_ROUTE } from '../src/protocol.ts'
+import { VOICE_DIRECT_ROUTE, VOICE_DIRECT_STATUS_ROUTE } from '../src/direct-protocol.ts'
 
 const config: VoiceConfig = {
   endpoint: 'wss://example.invalid/realtime',
+  temporaryKeyEndpoint: 'https://example.invalid/tokens',
+  temporaryKeyTtlSeconds: 60,
   apiKeyEnv: 'DASHSCOPE_API_KEY',
   model: 'qwen-audio-3.0-realtime-plus',
   voice: 'longanqian',
@@ -35,14 +38,16 @@ describe('Host plugin lifecycle', () => {
     }
 
     apply(context as never, config)
-    expect(registerUpgrade).toHaveBeenCalledTimes(1)
+    expect(registerUpgrade).toHaveBeenCalledTimes(2)
     expect(registerUpgrade.mock.calls[0]?.[0]).toMatchObject({ path: VOICE_ROUTE })
-    expect(register).toHaveBeenCalledTimes(1)
+    expect(registerUpgrade.mock.calls[1]?.[0]).toMatchObject({ path: VOICE_DIRECT_ROUTE })
+    expect(register).toHaveBeenCalledTimes(2)
     expect(register.mock.calls[0]?.[0]).toMatchObject({ kind: 'exact', path: `${VOICE_ROUTE}/status` })
+    expect(register.mock.calls[1]?.[0]).toMatchObject({ kind: 'exact', path: VOICE_DIRECT_STATUS_ROUTE })
     expect(lifecycle).toBeTypeOf('function')
 
     await lifecycle?.()
-    expect(unregister).toHaveBeenCalledTimes(1)
-    expect(unregisterStatus).toHaveBeenCalledTimes(1)
+    expect(unregister).toHaveBeenCalledTimes(2)
+    expect(unregisterStatus).toHaveBeenCalledTimes(2)
   })
 })

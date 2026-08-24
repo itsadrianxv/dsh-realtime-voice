@@ -2,7 +2,7 @@
 
 DeepSeek Harness 官方插件形态的实时语音 Agent：安装后在 WebUI 输入框旁出现拨打按钮，用户可持续对话、打断播报、询问进度，并用语音启动、追加、纠正或停止当前 DSH Agent 工作。
 
-当前研究版本：`0.1.0-alpha.9-research.4`，目标 DSH：`0.1.0-rc.7`。该版本位于独立研究分支，不替换已发布的 `alpha.8`。
+当前研究版本：`0.1.0-alpha.9-research.5`，目标 DSH：`0.1.0-rc.7`。该版本位于独立研究分支，不替换已发布的 `alpha.8`。
 
 本包同时声明 DSH bundle、Host 插件和“原生 WebUI 浏览器侧”插件。这里不是另做一个网站：UI 直接注入 DSH 自带的 `http://127.0.0.1:3080`，不新增页面或 UI 端口。它不修改 DSH 源码，不另起后台进程；卸载或禁用时会移除 UI/路由并关闭麦克风、音频、浏览器 WebSocket 和百炼连接，已经交给 DSH 的任务继续运行。
 
@@ -25,6 +25,9 @@ DeepSeek Harness 官方插件形态的实时语音 Agent：安装后在 WebUI �
 - 下行 PCM 按响应重组为 24 kHz/mono/s16le 的 40ms（1920 字节）有序帧，短尾帧先送达再 finalize；普通网络抖动排队，真正失控时显式可恢复重连而不静默丢音
 - DSH Host 权威单通话租约：status 只提供非秘密元数据，恢复 token 仅由 owning socket 获得；WebUI/微信同时拨号时只有 Host 原子仲裁的客户端成功
 - WebUI 本地所有权优先：已 ready、正在重连或仍持有本地恢复上下文时，不会被公开 `status.active` 误画成“另一端占用”；新拨号才由 status 预检，最终始终以 Host 的 ready/busy 裁决为准
+- 新增独立 `dsh.voice.direct.v1` 控制协议：微信/原生客户端可在 Host 原子占用和 DSH Agent 权威控制下，携短期百炼凭证直连媒体面；Host 控制通道严格零 PCM，Function Call、审批、追问、进度和终态通过有界、幂等的语义桥传递
+- Direct offer 的输入节奏固定声明为 32ms（16kHz/mono/s16le 约 1KB），仅描述客户端直传百炼的 append 节奏；输出仍按百炼可变 delta 由客户端连续播放
+- Direct 临时 Key 产品默认 60 秒、上限 120 秒，只允许官方签发端点且禁止重定向；临时 Key 不可提前撤销并继承父 Key 权限，生产必须使用仅授权目标 Realtime 模型的专用最小权限百炼 Key
 
 运行时为双平面：Qwen Audio Realtime 是低延迟会话面，负责听、说、自然问答、VAD 打断和判断是否需要真实执行；DSH 当前会话选择的 DeepSeek/千问等 Agent 模型是执行面，负责工具、项目上下文和持续 Agent 工作。两者通过 4 个窄语义 Function Call（交接、取消、审批、追问回答）及 DSH 权威事件合成一个助手体验。
 
@@ -68,7 +71,9 @@ dsh plugin --profile web remove @harness-remote/dsh-realtime-voice
 
 ## 微信小程序
 
-协议详见 [docs/PROTOCOL.md](docs/PROTOCOL.md)。小程序以后通过已经认证的 Harness Remote 网关代理同一 WebSocket 路径；插件仍然保管百炼密钥并执行所有 DSH 工具，小程序只实现录音、二进制帧、播放、字幕和控制 UI。
+Host 中转协议详见 [docs/PROTOCOL.md](docs/PROTOCOL.md)，客户端直连百炼媒体面的控制协议详见 [docs/DIRECT_PROTOCOL.md](docs/DIRECT_PROTOCOL.md)。Direct 模式下永久 Key 仍只由插件保管；租约成功后插件即时签发最短可用的临时凭证，小程序的 PCM 直接发送百炼，只有 DSH 控制、语义 Function Call 与 Agent 事件经过认证网关。
+
+百炼 WSS 的鉴权位于 WebSocket `Authorization` 握手头。微信和原生客户端可使用 Direct 模式；标准浏览器 WebSocket 无法设置该头，因此 3080 WebUI 保持使用隔离且兼容的 `dsh.voice.v1` Host 中转，不会把临时 bearer 降级放进 URL。微信合法 socket 域名、恢复/刷新和消息示例见 Direct 协议文档。
 
 小程序 V1 的产品边界是前台实时通话。微信没有承诺所有设备的 RecorderManager PCM 都具有一致的位深和字节序，所以小程序必须先通过真机探针确认 `pcm_s16le`，才能在 `voice.hello` 中声明 `pcmS16leVerified: true`。后台/锁屏连续录音、所有机型可靠全双工和裸 PCM 的统一回声消除不在 V1 承诺内；进入后台时语音链路可停，但 DSH Agent 继续运行，回到前台后重新连线并读取权威任务状态。
 

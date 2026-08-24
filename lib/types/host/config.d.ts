@@ -3,6 +3,8 @@ import { type RealtimeVoiceModel, type RealtimeVoiceTurnDetection } from '../mod
 /** Host-side realtime voice configuration; secrets are references, never values. */
 export interface VoiceConfig {
     endpoint: string;
+    temporaryKeyEndpoint: string;
+    temporaryKeyTtlSeconds: number;
     apiKeyEnv: string;
     model: RealtimeVoiceModel;
     voice: string;

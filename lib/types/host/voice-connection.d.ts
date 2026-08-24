@@ -40,7 +40,9 @@ export declare class VoiceConnection {
     private browserAudioTransportFailed;
     private playbackDrainFallbackTimer;
     private readonly suppressedResponses;
-    private readonly handledFunctionCalls;
+    private readonly handledProviderFunctionCalls;
+    private readonly providerFunctionScope;
+    private functionBridge;
     private latestUserTranscript;
     private agentWorkPending;
     private dshTurnRunning;
@@ -68,6 +70,8 @@ export declare class VoiceConnection {
     private reconcileDshHistory;
     private answerApproval;
     private answerQuestion;
+    private afterApprovalResolved;
+    private afterQuestionResolved;
     private sendApproval;
     private sendQuestion;
     /** Emit one protocol PCM packet and advance the cursor only for that packet. */

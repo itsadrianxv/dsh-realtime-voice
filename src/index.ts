@@ -10,10 +10,12 @@ import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-sett
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-tools'
 import { WebSocketServer } from 'ws'
-import { VOICE_ROUTE, VOICE_STATUS_ROUTE } from './protocol.ts'
+import { VOICE_DIRECT_PROTOCOL, VOICE_ROUTE, VOICE_STATUS_ROUTE } from './protocol.ts'
+import { VOICE_DIRECT_ROUTE, VOICE_DIRECT_STATUS_ROUTE } from './direct-protocol.ts'
 import { Config, type VoiceConfig } from './host/config.ts'
 import { VoiceConnection } from './host/voice-connection.ts'
 import { VoiceRuntime } from './host/voice-runtime.ts'
+import { DirectControlConnection } from './host/direct-control-connection.ts'
 import { REALTIME_VOICE_SETTINGS_NAMESPACE } from './models.ts'
 
 export { Config }
@@ -24,8 +26,9 @@ export const inject = ['webServer', 'apiProxy', 'credentials', 'agents', 'system
 
 /** Mount one exact WebSocket route. Every accepted connection is owned by this plugin fiber. */
 export function apply(ctx: Context, config: VoiceConfig): void {
-  const server = new WebSocketServer({ noServer: true })
-  const connections = new Set<VoiceConnection>()
+  const proxyServer = new WebSocketServer({ noServer: true })
+  const directServer = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 })
+  const connections = new Set<{ dispose(reason?: string): void }>()
   const voiceRuntime = new VoiceRuntime()
   let readConfig = (): VoiceConfig => config
 
@@ -43,21 +46,37 @@ export function apply(ctx: Context, config: VoiceConfig): void {
     },
   )
 
-  const upgrade = (request: IncomingMessage, socket: Duplex, head: Buffer): void => {
+  const authorizeUpgrade = (request: IncomingMessage, socket: Duplex): VoiceConfig | undefined => {
     const activeConfig = readConfig()
     if (!isLoopback(request.socket.remoteAddress) || !isAllowedOrigin(request)) {
       socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
       socket.destroy()
-      return
+      return undefined
     }
     if (connections.size >= activeConfig.maxConnections) {
       socket.write('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n')
       socket.destroy()
-      return
+      return undefined
     }
-    server.handleUpgrade(request, socket, head, (websocket) => {
+    return activeConfig
+  }
+
+  const upgradeProxy = (request: IncomingMessage, socket: Duplex, head: Buffer): void => {
+    const activeConfig = authorizeUpgrade(request, socket)
+    if (activeConfig === undefined) return
+    proxyServer.handleUpgrade(request, socket, head, (websocket) => {
       let connection: VoiceConnection
       connection = new VoiceConnection(ctx, websocket, request, activeConfig, () => connections.delete(connection), voiceRuntime)
+      connections.add(connection)
+    })
+  }
+
+  const upgradeDirect = (request: IncomingMessage, socket: Duplex, head: Buffer): void => {
+    const activeConfig = authorizeUpgrade(request, socket)
+    if (activeConfig === undefined) return
+    directServer.handleUpgrade(request, socket, head, (websocket) => {
+      let connection: DirectControlConnection
+      connection = new DirectControlConnection(ctx, websocket, request, activeConfig, () => connections.delete(connection), voiceRuntime)
       connections.add(connection)
     })
   }
@@ -77,19 +96,28 @@ export function apply(ctx: Context, config: VoiceConfig): void {
       'Content-Type': 'application/json; charset=utf-8',
       'Cache-Control': 'no-store',
     })
-    response.end(JSON.stringify(voiceRuntime.occupancy()))
+    response.end(JSON.stringify(voiceRuntime.occupancy(
+      request.url?.startsWith(VOICE_DIRECT_STATUS_ROUTE) === true ? VOICE_DIRECT_PROTOCOL : undefined,
+    )))
   }
 
   ctx.effect(() => {
     const unregisterStatus = ctx.webServer.register({ kind: 'exact', path: VOICE_STATUS_ROUTE, handler: status })
-    const unregister = ctx.webServer.registerUpgrade({ path: VOICE_ROUTE, handler: upgrade })
+    const unregisterDirectStatus = ctx.webServer.register({ kind: 'exact', path: VOICE_DIRECT_STATUS_ROUTE, handler: status })
+    const unregister = ctx.webServer.registerUpgrade({ path: VOICE_ROUTE, handler: upgradeProxy })
+    const unregisterDirect = ctx.webServer.registerUpgrade({ path: VOICE_DIRECT_ROUTE, handler: upgradeDirect })
     return async () => {
+      unregisterDirect()
       unregister()
+      unregisterDirectStatus()
       unregisterStatus()
       for (const connection of [...connections]) connection.dispose()
       connections.clear()
       voiceRuntime.clear()
-      await new Promise<void>((resolve) => server.close(() => resolve()))
+      await Promise.all([
+        new Promise<void>((resolve) => proxyServer.close(() => resolve())),
+        new Promise<void>((resolve) => directServer.close(() => resolve())),
+      ])
     }
   }, 'realtime-voice: route and active call lifecycle')
 }

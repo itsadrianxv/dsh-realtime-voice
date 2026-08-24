@@ -1,8 +1,35 @@
 import { type DshVoiceCoordinatorState } from './dsh-coordinator.ts';
 import type { PendingVoiceApproval, PendingVoiceQuestion } from './dsh-coordinator.ts';
 import { type VoiceClientPlatform, type VoiceOccupancyStatus } from '../protocol.ts';
+import type { VoiceControlProtocol } from '../protocol.ts';
+import type { DirectMediaOffer, DirectBackendEventKind, DirectClientMetrics } from '../direct-protocol.ts';
+import type { DshFunctionReceipt, DshInteractionReceipt } from './dsh-function-bridge.ts';
+import type { DshBackendBridge } from './dsh-backend-bridge.ts';
+export interface DirectBackendEventRecord {
+    eventId: string;
+    eventSeq: number;
+    kind: DirectBackendEventKind;
+    text: string;
+    acknowledged: boolean;
+}
+export interface DirectVoiceContinuityState {
+    backendEvents: Map<string, DirectBackendEventRecord>;
+    nextBackendEventSeq: number;
+    currentOffer?: DirectMediaOffer;
+    activeMedia?: {
+        offerId: string;
+        mediaSessionId: string;
+        connectedAt: number;
+    };
+    lastOfferIssuedAt?: number;
+    metrics?: DirectClientMetrics;
+    deliveredFunctionResults: Set<string>;
+    pendingOffer?: Promise<DirectMediaOffer>;
+    backendBridge?: DshBackendBridge;
+}
 export interface VoiceContinuityState {
     id: string;
+    protocol: VoiceControlProtocol;
     sessionId: string;
     platform: VoiceClientPlatform;
     createdAt: number;
@@ -14,11 +41,15 @@ export interface VoiceContinuityState {
     outputSequence: number;
     outputPtsMs: number;
     coordinator: DshVoiceCoordinatorState;
+    functionReceipts: Map<string, DshFunctionReceipt>;
+    interactionReceipts: Map<string, DshInteractionReceipt>;
     pendingApproval?: PendingVoiceApproval;
     pendingQuestion?: PendingVoiceQuestion;
+    direct?: DirectVoiceContinuityState;
 }
 export interface VoiceLeaseRequest {
     connectionId: string;
+    protocol?: VoiceControlProtocol;
     platform: VoiceClientPlatform;
     clientVersion: string;
     sessionId: string;
@@ -49,7 +80,8 @@ export declare class VoiceRuntime {
     acquireLease(request: VoiceLeaseRequest): VoiceLeaseResult;
     touch(state: VoiceContinuityState): void;
     release(connectionId: string, retainForResume?: boolean): void;
-    occupancy(): VoiceOccupancyStatus;
+    occupancy(inactiveProtocol?: VoiceControlProtocol): VoiceOccupancyStatus;
     clear(): void;
     private sweep;
+    private deleteCall;
 }

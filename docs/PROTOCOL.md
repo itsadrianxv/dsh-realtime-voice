@@ -1,5 +1,7 @@
 # DSH Voice Protocol v1
 
+This document specifies the compatible Host-relay mode. The independent client-to-provider media mode is specified in [DIRECT_PROTOCOL.md](DIRECT_PROTOCOL.md); it uses a separate protocol id and route and never reuses this binary PCM envelope.
+
 `dsh.voice.v1` is the client-neutral boundary between the DSH Host plugin and its user surfaces. WebUI is the first client. A WeChat Mini Program uses the same control messages, binary audio envelope, session pinning, interruption epoch, and DSH tool semantics.
 
 ## Transport

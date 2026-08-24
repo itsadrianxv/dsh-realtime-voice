@@ -2,9 +2,34 @@ import { randomUUID } from 'node:crypto'
 import { createDshVoiceCoordinatorState, type DshVoiceCoordinatorState } from './dsh-coordinator.ts'
 import type { PendingVoiceApproval, PendingVoiceQuestion } from './dsh-coordinator.ts'
 import { VOICE_PROTOCOL, type VoiceClientPlatform, type VoiceOccupancyStatus } from '../protocol.ts'
+import type { VoiceControlProtocol } from '../protocol.ts'
+import type { DirectMediaOffer, DirectBackendEventKind, DirectClientMetrics } from '../direct-protocol.ts'
+import type { DshFunctionReceipt, DshInteractionReceipt } from './dsh-function-bridge.ts'
+import type { DshBackendBridge } from './dsh-backend-bridge.ts'
+
+export interface DirectBackendEventRecord {
+  eventId: string
+  eventSeq: number
+  kind: DirectBackendEventKind
+  text: string
+  acknowledged: boolean
+}
+
+export interface DirectVoiceContinuityState {
+  backendEvents: Map<string, DirectBackendEventRecord>
+  nextBackendEventSeq: number
+  currentOffer?: DirectMediaOffer
+  activeMedia?: { offerId: string; mediaSessionId: string; connectedAt: number }
+  lastOfferIssuedAt?: number
+  metrics?: DirectClientMetrics
+  deliveredFunctionResults: Set<string>
+  pendingOffer?: Promise<DirectMediaOffer>
+  backendBridge?: DshBackendBridge
+}
 
 export interface VoiceContinuityState {
   id: string
+  protocol: VoiceControlProtocol
   sessionId: string
   platform: VoiceClientPlatform
   createdAt: number
@@ -16,12 +41,16 @@ export interface VoiceContinuityState {
   outputSequence: number
   outputPtsMs: number
   coordinator: DshVoiceCoordinatorState
+  functionReceipts: Map<string, DshFunctionReceipt>
+  interactionReceipts: Map<string, DshInteractionReceipt>
   pendingApproval?: PendingVoiceApproval
   pendingQuestion?: PendingVoiceQuestion
+  direct?: DirectVoiceContinuityState
 }
 
 export interface VoiceLeaseRequest {
   connectionId: string
+  protocol?: VoiceControlProtocol
   platform: VoiceClientPlatform
   clientVersion: string
   sessionId: string
@@ -31,6 +60,7 @@ export interface VoiceLeaseRequest {
 
 interface ActiveVoiceLease {
   connectionId: string
+  protocol: VoiceControlProtocol
   platform: VoiceClientPlatform
   clientVersion: string
   sessionId: string
@@ -64,19 +94,30 @@ export class VoiceRuntime {
   acquireLease(request: VoiceLeaseRequest): VoiceLeaseResult {
     this.sweep()
     const active = this.activeLease
+    const protocol = request.protocol ?? VOICE_PROTOCOL
     const mayResume = active !== undefined
       && !active.connected
+      && protocol === active.protocol
       && request.resumeId === active.voiceSessionId
       && request.sessionId === active.sessionId
       && request.platform === active.platform
     if (active !== undefined && !mayResume) {
-      return { ok: false, reason: 'busy', occupancy: this.occupancy() }
+      return { ok: false, reason: 'busy', occupancy: this.occupancy(protocol) }
+    }
+
+    // A resume capability is valid only while its disconnected lease remains
+    // inside the bounded grace interval. Retained call data is not authority.
+    if (request.resumeId !== undefined && !mayResume) {
+      return { ok: false, reason: 'invalid-resume', occupancy: this.occupancy(protocol) }
     }
 
     const resumed = request.resumeId === undefined ? undefined : this.calls.get(request.resumeId)
     if (request.resumeId !== undefined
-      && (resumed === undefined || resumed.sessionId !== request.sessionId || resumed.platform !== request.platform)) {
-      return { ok: false, reason: 'invalid-resume', occupancy: this.occupancy() }
+      && (resumed === undefined
+        || resumed.protocol !== protocol
+        || resumed.sessionId !== request.sessionId
+        || resumed.platform !== request.platform)) {
+      return { ok: false, reason: 'invalid-resume', occupancy: this.occupancy(protocol) }
     }
     let state: VoiceContinuityState
     if (resumed !== undefined && resumed.sessionId === request.sessionId) {
@@ -86,6 +127,7 @@ export class VoiceRuntime {
       const now = Date.now()
       state = {
         id: randomUUID(),
+        protocol,
         sessionId: request.sessionId,
         platform: request.platform,
         createdAt: now,
@@ -97,6 +139,8 @@ export class VoiceRuntime {
         outputSequence: 0,
         outputPtsMs: 0,
         coordinator: createDshVoiceCoordinatorState(),
+        functionReceipts: new Map(),
+        interactionReceipts: new Map(),
       }
       this.calls.set(state.id, state)
     }
@@ -105,6 +149,7 @@ export class VoiceRuntime {
     const startedAt = mayResume && active !== undefined ? active.startedAt : Date.now()
     this.activeLease = {
       connectionId: request.connectionId,
+      protocol,
       platform: request.platform,
       clientVersion: request.clientVersion,
       sessionId: request.sessionId,
@@ -130,7 +175,7 @@ export class VoiceRuntime {
     if (lease?.connectionId !== connectionId) return
     if (!retainForResume) {
       this.activeLease = undefined
-      this.calls.delete(lease.voiceSessionId)
+      this.deleteCall(lease.voiceSessionId)
       return
     }
     lease.connected = false
@@ -138,14 +183,15 @@ export class VoiceRuntime {
     lease.lastSeenAt = lease.disconnectedAt
   }
 
-  occupancy(): VoiceOccupancyStatus {
+  occupancy(inactiveProtocol: VoiceControlProtocol = VOICE_PROTOCOL): VoiceOccupancyStatus {
     this.sweep()
     const lease = this.activeLease
-    if (lease === undefined) return { protocol: VOICE_PROTOCOL, active: false }
+    if (lease === undefined) return { protocol: inactiveProtocol, active: false }
     return {
-      protocol: VOICE_PROTOCOL,
+      protocol: inactiveProtocol,
       active: true,
       owner: {
+        controlProtocol: lease.protocol,
         platform: lease.platform,
         clientVersion: lease.clientVersion,
         sessionId: lease.sessionId,
@@ -158,6 +204,7 @@ export class VoiceRuntime {
   clear(): void {
     this.activeLease?.revoke()
     this.activeLease = undefined
+    for (const id of this.calls.keys()) this.deleteCall(id)
     this.calls.clear()
   }
 
@@ -171,12 +218,18 @@ export class VoiceRuntime {
       const heartbeatExpired = lease.connected && lease.lastSeenAt < now - this.heartbeatTimeoutMs
       if (disconnectedExpired || heartbeatExpired) {
         this.activeLease = undefined
+        this.deleteCall(lease.voiceSessionId)
         lease.revoke()
       }
     }
     const expiredBefore = now - this.retentionMs
     for (const [id, state] of this.calls) {
-      if (id !== this.activeLease?.voiceSessionId && state.lastSeenAt < expiredBefore) this.calls.delete(id)
+      if (id !== this.activeLease?.voiceSessionId && state.lastSeenAt < expiredBefore) this.deleteCall(id)
     }
+  }
+
+  private deleteCall(id: string): void {
+    this.calls.get(id)?.direct?.backendBridge?.stop()
+    this.calls.delete(id)
   }
 }

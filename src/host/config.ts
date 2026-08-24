@@ -11,6 +11,8 @@ import {
 /** Host-side realtime voice configuration; secrets are references, never values. */
 export interface VoiceConfig {
   endpoint: string
+  temporaryKeyEndpoint: string
+  temporaryKeyTtlSeconds: number
   apiKeyEnv: string
   model: RealtimeVoiceModel
   voice: string
@@ -25,6 +27,8 @@ export interface VoiceConfig {
 
 export const Config: z<VoiceConfig> = z.object({
   endpoint: z.string().default('wss://dashscope.aliyuncs.com/api-ws/v1/realtime'),
+  temporaryKeyEndpoint: z.string().default('https://dashscope.aliyuncs.com/api/v1/tokens'),
+  temporaryKeyTtlSeconds: z.natural().min(1).max(120).default(60),
   apiKeyEnv: z.string().default('DASHSCOPE_API_KEY'),
   model: z.union([REALTIME_VOICE_MODELS.flash, REALTIME_VOICE_MODELS.plus]).default(DEFAULT_REALTIME_VOICE_MODEL),
   voice: z.string().default('longanqian'),
