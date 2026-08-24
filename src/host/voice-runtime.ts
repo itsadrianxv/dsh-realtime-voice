@@ -3,7 +3,7 @@ import { createDshVoiceCoordinatorState, type DshVoiceCoordinatorState } from '.
 import type { PendingVoiceApproval, PendingVoiceQuestion } from './dsh-coordinator.ts'
 import { VOICE_PROTOCOL, type VoiceClientPlatform, type VoiceOccupancyStatus } from '../protocol.ts'
 import type { VoiceControlProtocol } from '../protocol.ts'
-import type { DirectMediaOffer, DirectBackendEventKind, DirectClientMetrics } from '../direct-protocol.ts'
+import type { DirectMediaOffer, DirectBackendEventKind, DirectClientMetrics, DirectTranscriptCheckpoint } from '../direct-protocol.ts'
 import type { DshFunctionReceipt, DshInteractionReceipt } from './dsh-function-bridge.ts'
 import type { DshBackendBridge } from './dsh-backend-bridge.ts'
 
@@ -24,6 +24,7 @@ export interface DirectVoiceContinuityState {
   metrics?: DirectClientMetrics
   deliveredFunctionResults: Set<string>
   pendingOffer?: Promise<DirectMediaOffer>
+  transcriptCheckpoint?: DirectTranscriptCheckpoint
   backendBridge?: DshBackendBridge
 }
 
@@ -74,6 +75,17 @@ interface ActiveVoiceLease {
 
 export type VoiceLeaseResult =
   | { ok: true; state: VoiceContinuityState; resumed: boolean }
+  | { ok: false; reason: 'busy' | 'invalid-resume'; occupancy: VoiceOccupancyStatus }
+
+export interface VoiceReleaseRequest {
+  protocol: VoiceControlProtocol
+  platform: VoiceClientPlatform
+  sessionId: string
+  resumeId: string
+}
+
+export type VoiceReleaseResult =
+  | { ok: true }
   | { ok: false; reason: 'busy' | 'invalid-resume'; occupancy: VoiceOccupancyStatus }
 
 /**
@@ -163,6 +175,28 @@ export class VoiceRuntime {
     // callback may release the old connection id, but can never clear the new lease.
     previousRevoke?.()
     return { ok: true, state, resumed: resumed !== undefined }
+  }
+
+  /** Atomically consume a disconnected owner's resume capability and release its lease. */
+  resumeAndRelease(request: VoiceReleaseRequest): VoiceReleaseResult {
+    this.sweep()
+    const active = this.activeLease
+    if (active === undefined) {
+      return { ok: false, reason: 'invalid-resume', occupancy: this.occupancy(request.protocol) }
+    }
+    const state = this.calls.get(request.resumeId)
+    const matches = !active.connected
+      && active.protocol === request.protocol
+      && active.platform === request.platform
+      && active.sessionId === request.sessionId
+      && active.voiceSessionId === request.resumeId
+      && state?.protocol === request.protocol
+      && state.sessionId === request.sessionId
+      && state.platform === request.platform
+    if (!matches) return { ok: false, reason: 'busy', occupancy: this.occupancy(request.protocol) }
+    this.activeLease = undefined
+    this.deleteCall(active.voiceSessionId)
+    return { ok: true }
   }
 
   touch(state: VoiceContinuityState): void {

@@ -2,7 +2,7 @@ import { type DshVoiceCoordinatorState } from './dsh-coordinator.ts';
 import type { PendingVoiceApproval, PendingVoiceQuestion } from './dsh-coordinator.ts';
 import { type VoiceClientPlatform, type VoiceOccupancyStatus } from '../protocol.ts';
 import type { VoiceControlProtocol } from '../protocol.ts';
-import type { DirectMediaOffer, DirectBackendEventKind, DirectClientMetrics } from '../direct-protocol.ts';
+import type { DirectMediaOffer, DirectBackendEventKind, DirectClientMetrics, DirectTranscriptCheckpoint } from '../direct-protocol.ts';
 import type { DshFunctionReceipt, DshInteractionReceipt } from './dsh-function-bridge.ts';
 import type { DshBackendBridge } from './dsh-backend-bridge.ts';
 export interface DirectBackendEventRecord {
@@ -25,6 +25,7 @@ export interface DirectVoiceContinuityState {
     metrics?: DirectClientMetrics;
     deliveredFunctionResults: Set<string>;
     pendingOffer?: Promise<DirectMediaOffer>;
+    transcriptCheckpoint?: DirectTranscriptCheckpoint;
     backendBridge?: DshBackendBridge;
 }
 export interface VoiceContinuityState {
@@ -65,6 +66,19 @@ export type VoiceLeaseResult = {
     reason: 'busy' | 'invalid-resume';
     occupancy: VoiceOccupancyStatus;
 };
+export interface VoiceReleaseRequest {
+    protocol: VoiceControlProtocol;
+    platform: VoiceClientPlatform;
+    sessionId: string;
+    resumeId: string;
+}
+export type VoiceReleaseResult = {
+    ok: true;
+} | {
+    ok: false;
+    reason: 'busy' | 'invalid-resume';
+    occupancy: VoiceOccupancyStatus;
+};
 /**
  * Short-lived continuity ledger for transport reconnects. DSH remains the
  * durable source of task truth; this ledger only restores the conversational
@@ -78,6 +92,8 @@ export declare class VoiceRuntime {
     private activeLease;
     constructor(retentionMs?: number, reconnectGraceMs?: number, heartbeatTimeoutMs?: number);
     acquireLease(request: VoiceLeaseRequest): VoiceLeaseResult;
+    /** Atomically consume a disconnected owner's resume capability and release its lease. */
+    resumeAndRelease(request: VoiceReleaseRequest): VoiceReleaseResult;
     touch(state: VoiceContinuityState): void;
     release(connectionId: string, retainForResume?: boolean): void;
     occupancy(inactiveProtocol?: VoiceControlProtocol): VoiceOccupancyStatus;

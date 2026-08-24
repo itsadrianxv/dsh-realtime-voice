@@ -12,7 +12,11 @@ export { VOICE_DIRECT_PROTOCOL }
 export const VOICE_DIRECT_ROUTE = '/plugins/realtime-voice/v2/control' as const
 export const VOICE_DIRECT_STATUS_ROUTE = '/plugins/realtime-voice/v2/status' as const
 export const VOICE_DIRECT_BOOTSTRAP = 'dsh.voice.bootstrap.v1' as const
+export const VOICE_DIRECT_TRANSCRIPT = 'dsh.voice.transcript.v1' as const
 export const DIRECT_FUNCTION_ARGUMENT_MAX_BYTES = 16 * 1024
+export const DIRECT_TRANSCRIPT_MAX_ITEMS = 16
+export const DIRECT_TRANSCRIPT_MAX_TEXT_CHARS = 4_000
+export const DIRECT_TRANSCRIPT_MAX_BYTES = 16 * 1024
 export const DIRECT_DSH_FUNCTION_NAMES = [
   'handoff_to_dsh_agent',
   'cancel_dsh_agent',
@@ -24,6 +28,8 @@ export type DirectDshFunctionName = typeof DIRECT_DSH_FUNCTION_NAMES[number]
 export interface DirectVoiceHello {
   type: 'voice.hello'
   protocol: typeof VOICE_DIRECT_PROTOCOL
+  /** Absence is backward-compatible connect behavior. */
+  intent?: 'connect' | 'release'
   requestId: string
   client: {
     platform: VoiceClientPlatform
@@ -37,6 +43,35 @@ export interface DirectVoiceHello {
     voiceSessionId: string
     lastServerSeq: number
     lastBackendEventSeq: number
+    transcriptCheckpoint?: DirectTranscriptCheckpoint
+  }
+}
+
+export interface DirectTranscriptCheckpoint {
+  version: typeof VOICE_DIRECT_TRANSCRIPT
+  /** Final text only, ordered oldest to newest. */
+  items: DirectTranscriptItem[]
+}
+
+export interface DirectTranscriptItem {
+  role: 'user' | 'assistant'
+  text: string
+  final: true
+}
+
+export type DirectTranscriptHistoryEvent = {
+  type: 'conversation.item.create'
+  previous_item_id?: string
+  item: {
+    id: string
+    type: 'message'
+    role: 'user'
+    content: [{ type: 'input_text'; text: string }]
+  } | {
+    id: string
+    type: 'message'
+    role: 'assistant'
+    content: [{ type: 'output_text'; text: string }]
   }
 }
 
@@ -71,6 +106,13 @@ export interface DirectMediaOffer {
         turn_detection: { type: 'server_vad'; threshold: number; silence_duration_ms: number }
           | { type: 'smart_turn' }
       }
+    }
+    transcript?: {
+      version: typeof VOICE_DIRECT_TRANSCRIPT
+      applyAfter: 'session.updated'
+      acknowledgement: 'conversation.item.created'
+      completeBefore: 'media.connected'
+      events: DirectTranscriptHistoryEvent[]
     }
   }
 }
@@ -117,6 +159,14 @@ export type DirectVoiceServerControl = {
     functionBridge: true
     backendEventAck: true
     rawAudioOnControl: false
+    transcriptCheckpoint: {
+      version: typeof VOICE_DIRECT_TRANSCRIPT
+      maxItems: typeof DIRECT_TRANSCRIPT_MAX_ITEMS
+      maxTextChars: typeof DIRECT_TRANSCRIPT_MAX_TEXT_CHARS
+      maxBytes: typeof DIRECT_TRANSCRIPT_MAX_BYTES
+      completedTurnsOnly: true
+    }
+    resumeRelease: true
   }
   mediaOffer: DirectMediaOffer
 } | { type: 'voice.busy'; serverSeq: number; occupancy: VoiceOccupancyStatus }
@@ -177,6 +227,7 @@ function isDirectHello(value: Record<string, unknown>): boolean {
   const target = value.target
   const resume = value.resume
   return value.protocol === VOICE_DIRECT_PROTOCOL
+    && (value.intent === undefined || value.intent === 'connect' || value.intent === 'release')
     && isShortString(value.requestId, 128)
     && isRecord(client)
     && isPlatform(client.platform)
@@ -190,7 +241,28 @@ function isDirectHello(value: Record<string, unknown>): boolean {
       && isShortString(resume.voiceSessionId, 256)
       && isNonNegativeInteger(resume.lastServerSeq)
       && isNonNegativeInteger(resume.lastBackendEventSeq)
+      && (resume.transcriptCheckpoint === undefined || isDirectTranscriptCheckpoint(resume.transcriptCheckpoint))
     ))
+    && (value.intent !== 'release' || (resume !== undefined && isRecord(resume) && resume.transcriptCheckpoint === undefined))
+}
+
+export function isDirectTranscriptCheckpoint(value: unknown): value is DirectTranscriptCheckpoint {
+  if (!isRecord(value) || value.version !== VOICE_DIRECT_TRANSCRIPT || !Array.isArray(value.items)) return false
+  if (Object.keys(value).some(key => key !== 'version' && key !== 'items')) return false
+  if (value.items.length > DIRECT_TRANSCRIPT_MAX_ITEMS) return false
+  let totalBytes = 0
+  for (const item of value.items) {
+    if (!isRecord(item) || Object.keys(item).some(key => key !== 'role' && key !== 'text' && key !== 'final')) return false
+    if ((item.role !== 'user' && item.role !== 'assistant')
+      || item.final !== true
+      || typeof item.text !== 'string'
+      || item.text.trim() === ''
+      || item.text.length > DIRECT_TRANSCRIPT_MAX_TEXT_CHARS) return false
+    totalBytes += new TextEncoder().encode(item.text).byteLength
+    if (totalBytes > DIRECT_TRANSCRIPT_MAX_BYTES) return false
+  }
+  if (value.items.length % 2 !== 0) return false
+  return value.items.every((item, index) => item.role === (index % 2 === 0 ? 'user' : 'assistant'))
 }
 
 function isMetricsMessage(value: Record<string, unknown>): boolean {

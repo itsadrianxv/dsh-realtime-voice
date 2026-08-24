@@ -4,7 +4,11 @@ import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type WebSocket from 'ws'
 import {
+  DIRECT_TRANSCRIPT_MAX_BYTES,
+  DIRECT_TRANSCRIPT_MAX_ITEMS,
+  DIRECT_TRANSCRIPT_MAX_TEXT_CHARS,
   VOICE_DIRECT_PROTOCOL,
+  VOICE_DIRECT_TRANSCRIPT,
   isDirectVoiceClientControl,
   type DirectBackendEventKind,
   type DirectClientMetrics,
@@ -167,12 +171,25 @@ export class DirectControlConnection {
   private async start(hello: DirectVoiceHello): Promise<void> {
     clearTimeout(this.helloTimer)
     this.hello = hello
-    if (!hello.client.websocketAuthorizationHeader) {
-      this.fail(
-        'media-transport-unsupported',
-        '百炼 Realtime WSS 要求 Authorization 握手头；当前客户端运行时不支持。标准浏览器 WebSocket 必须继续使用隔离的 dsh.voice.v1。',
-        false,
-      )
+    if (hello.intent === 'release') {
+      const resume = hello.resume!
+      const released = this.runtime.resumeAndRelease({
+        protocol: VOICE_DIRECT_PROTOCOL,
+        platform: hello.client.platform,
+        sessionId: hello.target.sessionId,
+        resumeId: resume.voiceSessionId,
+      })
+      if (!released.ok) {
+        if (released.reason === 'busy') {
+          this.send({ type: 'voice.busy', serverSeq: this.nextSeq(), occupancy: released.occupancy })
+          this.dispose('voice-busy')
+        } else {
+          this.fail('release-rejected', '语音释放凭证已过期、无效或与协议、平台、DSH 会话不匹配。', false)
+        }
+        return
+      }
+      this.send({ type: 'voice.ended', serverSeq: this.nextSeq(), reason: 'resume-owner-released' })
+      this.dispose('release-complete')
       return
     }
     const lease = this.runtime.acquireLease({
@@ -205,6 +222,21 @@ export class DirectControlConnection {
       this.fail('resume-backend-sequence-invalid', '客户端后端事件恢复序号超出 Host 权威水位。', false)
       return
     }
+    if (!hello.client.websocketAuthorizationHeader) {
+      this.fail(
+        'media-transport-unsupported',
+        '百炼 Realtime WSS 要求 Authorization 握手头；当前客户端运行时不支持。标准浏览器 WebSocket 必须继续使用隔离的 dsh.voice.v1。',
+        false,
+      )
+      return
+    }
+    const checkpoint = hello.resume?.transcriptCheckpoint
+    if (checkpoint !== undefined) {
+      this.direct.transcriptCheckpoint = {
+        version: checkpoint.version,
+        items: checkpoint.items.map(item => ({ ...item })),
+      }
+    }
 
     const session = new DshVoiceSession(this.ctx, hello.target.sessionId)
     const status = await session.snapshot()
@@ -214,7 +246,7 @@ export class DirectControlConnection {
       onApprovalResolved: (approval, outcome) => this.afterApprovalResolved(approval, outcome),
       onQuestionResolved: question => this.afterQuestionResolved(question),
     }, lease.state.interactionReceipts)
-    const offer = await this.issueOffer(buildVoiceInstructions(status, lease.state))
+    const offer = await this.issueOffer(buildVoiceInstructions(status))
     if (this.closed) return
 
     const backendCallbacks = this.backendCallbacks()
@@ -238,6 +270,14 @@ export class DirectControlConnection {
         functionBridge: true,
         backendEventAck: true,
         rawAudioOnControl: false,
+        transcriptCheckpoint: {
+          version: VOICE_DIRECT_TRANSCRIPT,
+          maxItems: DIRECT_TRANSCRIPT_MAX_ITEMS,
+          maxTextChars: DIRECT_TRANSCRIPT_MAX_TEXT_CHARS,
+          maxBytes: DIRECT_TRANSCRIPT_MAX_BYTES,
+          completedTurnsOnly: true,
+        },
+        resumeRelease: true,
       },
       mediaOffer: offer,
     })
@@ -268,7 +308,6 @@ export class DirectControlConnection {
       endpoint.searchParams.set('model', this.config.model)
       const effectiveInstructions = instructions ?? buildVoiceInstructions(
         await new DshVoiceSession(this.ctx, this.hello!.target.sessionId).snapshot(),
-        this.continuity,
       )
       const offer: DirectMediaOffer = {
         offerId: randomUUID(),
@@ -286,7 +325,7 @@ export class DirectControlConnection {
           input: { encoding: 'pcm_s16le', sampleRate: 16_000, channels: 1, recommendedChunkDurationMs: 32 },
           output: { encoding: 'pcm_s16le', sampleRate: 24_000, channels: 1, providerDeltaFraming: 'variable' },
         },
-        bootstrap: buildDirectMediaOfferBootstrap(this.config, effectiveInstructions),
+        bootstrap: buildDirectMediaOfferBootstrap(this.config, effectiveInstructions, direct.transcriptCheckpoint),
       }
       direct.currentOffer = offer
       return offer

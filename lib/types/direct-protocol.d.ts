@@ -3,12 +3,18 @@ export { VOICE_DIRECT_PROTOCOL };
 export declare const VOICE_DIRECT_ROUTE: "/plugins/realtime-voice/v2/control";
 export declare const VOICE_DIRECT_STATUS_ROUTE: "/plugins/realtime-voice/v2/status";
 export declare const VOICE_DIRECT_BOOTSTRAP: "dsh.voice.bootstrap.v1";
+export declare const VOICE_DIRECT_TRANSCRIPT: "dsh.voice.transcript.v1";
 export declare const DIRECT_FUNCTION_ARGUMENT_MAX_BYTES: number;
+export declare const DIRECT_TRANSCRIPT_MAX_ITEMS = 16;
+export declare const DIRECT_TRANSCRIPT_MAX_TEXT_CHARS = 4000;
+export declare const DIRECT_TRANSCRIPT_MAX_BYTES: number;
 export declare const DIRECT_DSH_FUNCTION_NAMES: readonly ["handoff_to_dsh_agent", "cancel_dsh_agent", "answer_dsh_approval", "answer_dsh_question"];
 export type DirectDshFunctionName = typeof DIRECT_DSH_FUNCTION_NAMES[number];
 export interface DirectVoiceHello {
     type: 'voice.hello';
     protocol: typeof VOICE_DIRECT_PROTOCOL;
+    /** Absence is backward-compatible connect behavior. */
+    intent?: 'connect' | 'release';
     requestId: string;
     client: {
         platform: VoiceClientPlatform;
@@ -24,8 +30,40 @@ export interface DirectVoiceHello {
         voiceSessionId: string;
         lastServerSeq: number;
         lastBackendEventSeq: number;
+        transcriptCheckpoint?: DirectTranscriptCheckpoint;
     };
 }
+export interface DirectTranscriptCheckpoint {
+    version: typeof VOICE_DIRECT_TRANSCRIPT;
+    /** Final text only, ordered oldest to newest. */
+    items: DirectTranscriptItem[];
+}
+export interface DirectTranscriptItem {
+    role: 'user' | 'assistant';
+    text: string;
+    final: true;
+}
+export type DirectTranscriptHistoryEvent = {
+    type: 'conversation.item.create';
+    previous_item_id?: string;
+    item: {
+        id: string;
+        type: 'message';
+        role: 'user';
+        content: [{
+            type: 'input_text';
+            text: string;
+        }];
+    } | {
+        id: string;
+        type: 'message';
+        role: 'assistant';
+        content: [{
+            type: 'output_text';
+            text: string;
+        }];
+    };
+};
 export interface DirectMediaOffer {
     offerId: string;
     transport: 'websocket';
@@ -72,6 +110,13 @@ export interface DirectMediaOffer {
                     type: 'smart_turn';
                 };
             };
+        };
+        transcript?: {
+            version: typeof VOICE_DIRECT_TRANSCRIPT;
+            applyAfter: 'session.updated';
+            acknowledgement: 'conversation.item.created';
+            completeBefore: 'media.connected';
+            events: DirectTranscriptHistoryEvent[];
         };
     };
 }
@@ -152,6 +197,14 @@ export type DirectVoiceServerControl = {
         functionBridge: true;
         backendEventAck: true;
         rawAudioOnControl: false;
+        transcriptCheckpoint: {
+            version: typeof VOICE_DIRECT_TRANSCRIPT;
+            maxItems: typeof DIRECT_TRANSCRIPT_MAX_ITEMS;
+            maxTextChars: typeof DIRECT_TRANSCRIPT_MAX_TEXT_CHARS;
+            maxBytes: typeof DIRECT_TRANSCRIPT_MAX_BYTES;
+            completedTurnsOnly: true;
+        };
+        resumeRelease: true;
     };
     mediaOffer: DirectMediaOffer;
 } | {
@@ -220,5 +273,6 @@ export type DirectVoiceServerControl = {
 };
 export type DirectBackendEventKind = 'status' | 'complete' | 'failed' | 'cancelled' | 'needs-approval' | 'needs-input';
 export declare function isDirectVoiceClientControl(value: unknown): value is DirectVoiceClientControl;
+export declare function isDirectTranscriptCheckpoint(value: unknown): value is DirectTranscriptCheckpoint;
 export declare function isDirectDshFunctionName(value: unknown): value is DirectDshFunctionName;
 export declare function isDirectFunctionArguments(name: DirectDshFunctionName, value: string): boolean;

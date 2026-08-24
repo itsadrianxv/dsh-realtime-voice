@@ -2,7 +2,7 @@
 
 DeepSeek Harness 官方插件形态的实时语音 Agent：安装后在 WebUI 输入框旁出现拨打按钮，用户可持续对话、打断播报、询问进度，并用语音启动、追加、纠正或停止当前 DSH Agent 工作。
 
-当前研究版本：`0.1.0-alpha.9-research.5`，目标 DSH：`0.1.0-rc.7`。该版本位于独立研究分支，不替换已发布的 `alpha.8`。
+当前研究版本：`0.1.0-alpha.9-research.6`，目标 DSH：`0.1.0-rc.7`。该版本位于独立研究分支，不替换已发布的 `alpha.8`。
 
 本包同时声明 DSH bundle、Host 插件和“原生 WebUI 浏览器侧”插件。这里不是另做一个网站：UI 直接注入 DSH 自带的 `http://127.0.0.1:3080`，不新增页面或 UI 端口。它不修改 DSH 源码，不另起后台进程；卸载或禁用时会移除 UI/路由并关闭麦克风、音频、浏览器 WebSocket 和百炼连接，已经交给 DSH 的任务继续运行。
 
@@ -27,6 +27,7 @@ DeepSeek Harness 官方插件形态的实时语音 Agent：安装后在 WebUI �
 - WebUI 本地所有权优先：已 ready、正在重连或仍持有本地恢复上下文时，不会被公开 `status.active` 误画成“另一端占用”；新拨号才由 status 预检，最终始终以 Host 的 ready/busy 裁决为准
 - 新增独立 `dsh.voice.direct.v1` 控制协议：微信/原生客户端可在 Host 原子占用和 DSH Agent 权威控制下，携短期百炼凭证直连媒体面；Host 控制通道严格零 PCM，Function Call、审批、追问、进度和终态通过有界、幂等的语义桥传递
 - Direct offer 的输入节奏固定声明为 32ms（16kHz/mono/s16le 约 1KB），仅描述客户端直传百炼的 append 节奏；输出仍按百炼可变 delta 由客户端连续播放
+- Direct 新媒体会话可通过 `dsh.voice.transcript.v1` 恢复最近 8 轮有界 final 文本：历史按百炼 `conversation.item.create` 正式注入且绝不提升为 Host 指令；断线期间挂断可用原子 `intent: release` 立即清租约，不签 Key、不建媒体会话、不取消 DSH Agent
 - Direct 临时 Key 产品默认 60 秒、上限 120 秒，只允许官方签发端点且禁止重定向；临时 Key 不可提前撤销并继承父 Key 权限，生产必须使用仅授权目标 Realtime 模型的专用最小权限百炼 Key
 
 运行时为双平面：Qwen Audio Realtime 是低延迟会话面，负责听、说、自然问答、VAD 打断和判断是否需要真实执行；DSH 当前会话选择的 DeepSeek/千问等 Agent 模型是执行面，负责工具、项目上下文和持续 Agent 工作。两者通过 4 个窄语义 Function Call（交接、取消、审批、追问回答）及 DSH 权威事件合成一个助手体验。

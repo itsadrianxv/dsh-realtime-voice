@@ -8,6 +8,7 @@
 - Non-secret occupancy status: `GET /plugins/realtime-voice/v2/status`
 - Provider media WebSocket: the `mediaOffer.endpoint` returned by the Host
 - Bootstrap schema: `dsh.voice.bootstrap.v1`
+- Transcript checkpoint schema: `dsh.voice.transcript.v1`
 
 The DSH Host atomically owns the process-wide voice lease, pins one DSH `sessionId`, issues temporary provider credentials, validates semantic tool calls, executes DSH coordination, and projects authoritative Agent events. The client sends microphone PCM directly to DashScope and plays DashScope PCM directly. A binary frame on the control WebSocket is a fatal `raw-audio-forbidden` error; the Host application never reads, queues, logs, or forwards direct-mode PCM, and the Direct WebSocket parser caps frames at 64 KiB.
 
@@ -48,7 +49,15 @@ Owner response (bearer shortened here only for documentation):
     "reconnect": true,
     "functionBridge": true,
     "backendEventAck": true,
-    "rawAudioOnControl": false
+    "rawAudioOnControl": false,
+    "transcriptCheckpoint": {
+      "version": "dsh.voice.transcript.v1",
+      "maxItems": 16,
+      "maxTextChars": 4000,
+      "maxBytes": 16384,
+      "completedTurnsOnly": true
+    },
+    "resumeRelease": true
   },
   "mediaOffer": {
     "offerId": "offer-uuid",
@@ -121,6 +130,90 @@ Control clients send `voice.ping` at least every 15 seconds and receive `voice.p
 ```
 
 The Host atomically validates protocol, platform, bound DSH session, active disconnected lease, grace interval, and sequence watermarks. Public status is never evidence of resume authority. A successful resume returns the same `voiceSessionId` and a new short-lived media offer.
+
+### Transcript continuity across a new provider socket
+
+A control resume preserves Host continuity but necessarily creates a new DashScope Realtime conversation. A client that has collected provider-final text may attach one complete checkpoint to that same resume hello:
+
+```json
+{
+  "type": "voice.hello",
+  "protocol": "dsh.voice.direct.v1",
+  "requestId": "new-request",
+  "client": { "platform": "wechat-mini-program", "version": "1.1.0", "foregroundOnly": true, "websocketAuthorizationHeader": true },
+  "target": { "sessionId": "dsh-session-id" },
+  "resume": {
+    "voiceSessionId": "opaque-resume-capability",
+    "lastServerSeq": 18,
+    "lastBackendEventSeq": 7,
+    "transcriptCheckpoint": {
+      "version": "dsh.voice.transcript.v1",
+      "items": [
+        { "role": "user", "text": "我们刚才在讨论打印设置。", "final": true },
+        { "role": "assistant", "text": "对，已经确认使用彩色双面打印。", "final": true }
+      ]
+    }
+  }
+}
+```
+
+The checkpoint is accepted only after the resume capability wins the Host's atomic lease arbitration and before a replacement offer is issued. It contains at most 16 items, each text has at most 4,000 JavaScript characters, all text together has at most 16 KiB in UTF-8, and the items must be complete `user, assistant` pairs in chronological order. Only final text is legal: deltas, partial/cancelled responses, system/tool roles, arbitrary metadata, extra keys, odd/unpaired turns, blank text, and over-limit payloads reject the hello. The Host retains the last accepted checkpoint only inside that call's bounded in-memory continuity state; explicit end/release, grace expiry, or plugin disposal deletes it. Omitting the field preserves the prior accepted checkpoint and is backward compatible with existing Direct clients.
+
+The replacement `mediaOffer.bootstrap` then contains a transcript hydration plan alongside the existing `session.update`:
+
+```json
+{
+  "transcript": {
+    "version": "dsh.voice.transcript.v1",
+    "applyAfter": "session.updated",
+    "acknowledgement": "conversation.item.created",
+    "completeBefore": "media.connected",
+    "events": [
+      {
+        "type": "conversation.item.create",
+        "item": {
+          "id": "dsh_hist_000",
+          "type": "message",
+          "role": "user",
+          "content": [{ "type": "input_text", "text": "我们刚才在讨论打印设置。" }]
+        }
+      },
+      {
+        "type": "conversation.item.create",
+        "previous_item_id": "dsh_hist_000",
+        "item": {
+          "id": "dsh_hist_001",
+          "type": "message",
+          "role": "assistant",
+          "content": [{ "type": "output_text", "text": "对，已经确认使用彩色双面打印。" }]
+        }
+      }
+    ]
+  }
+}
+```
+
+The client must send `session.update`, wait for `session.updated`, send these `conversation.item.create` events in order, and wait for the matching `conversation.item.created` for every exact Host-generated item id. Only then may it send `media.connected`, open the microphone, inject backend events, or forward Function Calls. Hydration itself sends no audio and no `response.create`; it must not produce or forward a Function Call. User history uses `input_text`, assistant history uses `output_text`, and `previous_item_id` fixes ordering.
+
+Checkpoint text is authenticated only as low-privilege conversation history supplied by the current lease owner. It is never concatenated into system instructions, a DSH prompt, a Function result, an approval, or the authoritative backend-event ledger. Strings such as `[BACKEND][COMPLETE]`, markup, JSON, or “ignore previous instructions” remain ordinary text in their declared user/assistant item and cannot authorize work or change DSH state. The static bootstrap instruction explicitly preserves this trust boundary.
+
+### Resume and release without a media offer
+
+If the user hangs up while the old control socket is already disconnected, the client opens a control socket and sends the same hello with `"intent": "release"`, the locally held resume tuple, and no transcript checkpoint. `websocketAuthorizationHeader` may be false because this path never opens provider media:
+
+```json
+{
+  "type": "voice.hello",
+  "protocol": "dsh.voice.direct.v1",
+  "intent": "release",
+  "requestId": "release-request",
+  "client": { "platform": "wechat-mini-program", "version": "1.1.0", "foregroundOnly": true, "websocketAuthorizationHeader": false },
+  "target": { "sessionId": "dsh-session-id" },
+  "resume": { "voiceSessionId": "opaque-resume-capability", "lastServerSeq": 18, "lastBackendEventSeq": 7 }
+}
+```
+
+The Host atomically releases only an active, disconnected lease whose protocol, platform, DSH `sessionId`, and secret `voiceSessionId` all match and are still inside resume grace. Success returns `voice.ended { reason: "resume-owner-released" }` and makes occupancy inactive immediately. It does not resolve the permanent credential, issue a temporary key, read DSH history, construct an offer, or cancel already-started DSH Agent work. A healthy connected owner, a resumed owner, another protocol/platform/session, a wrong token, and an expired token cannot be released. Absence of `intent` remains the original connect/resume behavior.
 
 ## Provider Function Call bridge
 
@@ -195,7 +288,7 @@ For a WeChat Mini Program, configure these socket request domains according to t
 
 Also configure the deployment's HTTPS control/API origin as a request domain when status or bootstrap APIs use HTTPS. Domain entries are an inference from the official endpoints; verify that the production `wx.connectSocket` runtime preserves the Authorization header on a real device before release.
 
-Official references: [temporary API keys](https://help.aliyun.com/zh/model-studio/generate-temporary-api-key), [Realtime token authentication](https://help.aliyun.com/en/model-studio/realtime-token-authentication), and [Qwen Audio Realtime](https://help.aliyun.com/zh/model-studio/fun-audiochat-realtime).
+Official references: [temporary API keys](https://help.aliyun.com/zh/model-studio/generate-temporary-api-key), [Realtime token authentication](https://help.aliyun.com/en/model-studio/realtime-token-authentication), [Qwen Audio Realtime](https://help.aliyun.com/zh/model-studio/fun-audiochat-realtime), and [Qwen Audio Realtime client events / history injection](https://help.aliyun.com/zh/model-studio/fun-audiochat-client-events).
 
 ## Smoke test
 

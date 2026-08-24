@@ -4,6 +4,7 @@ import { Config } from '../src/host/config.ts'
 import { VoiceConnection } from '../src/host/voice-connection.ts'
 import { VoiceRuntime } from '../src/host/voice-runtime.ts'
 import { VOICE_DIRECT_PROTOCOL } from '../src/direct-protocol.ts'
+import { VOICE_PROTOCOL } from '../src/protocol.ts'
 
 class FakeVoiceSocket extends EventEmitter {
   readonly OPEN = 1
@@ -15,6 +16,73 @@ class FakeVoiceSocket extends EventEmitter {
 }
 
 describe('VoiceRuntime authoritative occupancy', () => {
+  it('atomically consumes only a matching disconnected direct resume capability', () => {
+    const runtime = new VoiceRuntime()
+    const initial = runtime.acquireLease({
+      connectionId: 'direct-old', protocol: VOICE_DIRECT_PROTOCOL, platform: 'ios', clientVersion: 'test',
+      sessionId: 'session-1', revoke: vi.fn(),
+    })
+    if (!initial.ok) throw new Error('direct lease was not acquired')
+    const stop = vi.fn()
+    initial.state.direct = {
+      backendEvents: new Map(), nextBackendEventSeq: 0, deliveredFunctionResults: new Set(),
+      backendBridge: { stop } as never,
+    }
+    runtime.release('direct-old', true)
+    expect(runtime.resumeAndRelease({
+      protocol: VOICE_DIRECT_PROTOCOL, platform: 'ios', sessionId: 'session-1', resumeId: initial.state.id,
+    })).toEqual({ ok: true })
+    expect(stop).toHaveBeenCalledTimes(1)
+    expect(runtime.occupancy(VOICE_DIRECT_PROTOCOL)).toEqual({ protocol: VOICE_DIRECT_PROTOCOL, active: false })
+    expect(runtime.resumeAndRelease({
+      protocol: VOICE_DIRECT_PROTOCOL, platform: 'ios', sessionId: 'session-1', resumeId: initial.state.id,
+    })).toMatchObject({ ok: false, reason: 'invalid-resume' })
+  })
+
+  it('never lets release intent kick a healthy or already-resumed owner', () => {
+    const runtime = new VoiceRuntime()
+    const initial = runtime.acquireLease({
+      connectionId: 'direct-healthy', protocol: VOICE_DIRECT_PROTOCOL, platform: 'ios', clientVersion: 'test',
+      sessionId: 'session-1', revoke: vi.fn(),
+    })
+    if (!initial.ok) throw new Error('direct lease was not acquired')
+    expect(runtime.resumeAndRelease({
+      protocol: VOICE_DIRECT_PROTOCOL, platform: 'ios', sessionId: 'session-1', resumeId: initial.state.id,
+    })).toMatchObject({ ok: false, reason: 'busy' })
+    runtime.release('direct-healthy', true)
+    const resumed = runtime.acquireLease({
+      connectionId: 'direct-new', protocol: VOICE_DIRECT_PROTOCOL, platform: 'ios', clientVersion: 'test',
+      sessionId: 'session-1', resumeId: initial.state.id, revoke: vi.fn(),
+    })
+    expect(resumed).toMatchObject({ ok: true, resumed: true })
+    expect(runtime.resumeAndRelease({
+      protocol: VOICE_DIRECT_PROTOCOL, platform: 'ios', sessionId: 'session-1', resumeId: initial.state.id,
+    })).toMatchObject({ ok: false, reason: 'busy' })
+  })
+
+  it('rejects cross-session and wrong-token release, then permits an immediate fresh lease after exact release', () => {
+    const runtime = new VoiceRuntime()
+    const initial = runtime.acquireLease({
+      connectionId: 'direct-old', protocol: VOICE_DIRECT_PROTOCOL, platform: 'ios', clientVersion: 'test',
+      sessionId: 'session-1', revoke: vi.fn(),
+    })
+    if (!initial.ok) throw new Error('direct lease was not acquired')
+    runtime.release('direct-old', true)
+    for (const request of [
+      { protocol: VOICE_DIRECT_PROTOCOL, platform: 'ios' as const, sessionId: 'session-2', resumeId: initial.state.id },
+      { protocol: VOICE_DIRECT_PROTOCOL, platform: 'ios' as const, sessionId: 'session-1', resumeId: 'wrong-token' },
+      { protocol: VOICE_PROTOCOL, platform: 'ios' as const, sessionId: 'session-1', resumeId: initial.state.id },
+    ]) {
+      expect(runtime.resumeAndRelease(request)).toMatchObject({ ok: false, reason: 'busy' })
+    }
+    expect(runtime.resumeAndRelease({
+      protocol: VOICE_DIRECT_PROTOCOL, platform: 'ios', sessionId: 'session-1', resumeId: initial.state.id,
+    })).toEqual({ ok: true })
+    expect(runtime.acquireLease({
+      connectionId: 'fresh', protocol: VOICE_DIRECT_PROTOCOL, platform: 'wechat-mini-program', clientVersion: 'test',
+      sessionId: 'session-2', revoke: vi.fn(),
+    })).toMatchObject({ ok: true, resumed: false })
+  })
   it('shares one atomic lease across isolated v1 and direct protocols and rejects cross-protocol resume', () => {
     const runtime = new VoiceRuntime()
     const direct = runtime.acquireLease({
@@ -66,6 +134,12 @@ describe('VoiceRuntime authoritative occupancy', () => {
       if (!direct.ok) throw new Error('direct lease was not acquired')
       runtime.release('direct-old', true)
       vi.advanceTimersByTime(30_001)
+      expect(runtime.resumeAndRelease({
+        protocol: VOICE_DIRECT_PROTOCOL,
+        platform: 'wechat-mini-program',
+        sessionId: 'session-direct',
+        resumeId: direct.state.id,
+      })).toMatchObject({ ok: false, reason: 'invalid-resume', occupancy: { active: false } })
       expect(runtime.acquireLease({
         connectionId: 'direct-too-late',
         protocol: VOICE_DIRECT_PROTOCOL,
