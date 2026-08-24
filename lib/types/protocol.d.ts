@@ -3,7 +3,7 @@ export declare const VOICE_PROTOCOL: "dsh.voice.v1";
 export declare const VOICE_PROTOCOL_VERSION: 1;
 export declare const VOICE_ROUTE: "/plugins/realtime-voice/v1";
 export declare const VOICE_STATUS_ROUTE: "/plugins/realtime-voice/v1/status";
-export declare const VOICE_WEB_CLIENT_VERSION: "0.1.0-alpha.9-research.2";
+export declare const VOICE_WEB_CLIENT_VERSION: "0.1.0-alpha.9-research.3";
 export declare const INPUT_SAMPLE_RATE: 16000;
 export declare const OUTPUT_SAMPLE_RATE: 24000;
 export declare const AUDIO_CHANNELS: 1;

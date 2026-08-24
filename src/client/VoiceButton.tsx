@@ -1,5 +1,5 @@
 import type { HostObservable, InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { VoiceSnapshot } from './controller.ts'
+import { isVoiceDialUnavailable, type VoiceSnapshot } from './controller.ts'
 import styles from './voice.module.css'
 
 export interface VoiceButtonInjected {
@@ -11,9 +11,8 @@ export type VoiceButtonProps = PropsRuntime<'conversation.input.right'> & Inject
 /** Compact call control in the official composer right-hand action slot. */
 export function VoiceButton({ useVoice, toggle }: VoiceButtonProps) {
   const phase = useVoice(snapshot => snapshot.phase)
-  const occupied = useVoice(snapshot => snapshot.occupancy?.active === true)
+  const unavailable = useVoice(isVoiceDialUnavailable)
   const active = phase !== 'idle' && phase !== 'error'
-  const unavailable = occupied && !active
   return (
     <button
       type="button"

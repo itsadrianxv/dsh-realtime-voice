@@ -1,7 +1,54 @@
+import { EventEmitter } from 'node:events'
 import { describe, expect, it, vi } from 'vitest'
+import { Config } from '../src/host/config.ts'
+import { VoiceConnection } from '../src/host/voice-connection.ts'
 import { VoiceRuntime } from '../src/host/voice-runtime.ts'
 
+class FakeVoiceSocket extends EventEmitter {
+  readonly OPEN = 1
+  readonly CONNECTING = 0
+  readyState = this.OPEN
+
+  send(): void {}
+  close(): void { this.readyState = 3 }
+}
+
 describe('VoiceRuntime authoritative occupancy', () => {
+  it('releases a pre-ready transport immediately because no client owns its resume token yet', () => {
+    const runtime = new VoiceRuntime()
+    const socket = new FakeVoiceSocket()
+    const connection = new VoiceConnection(
+      { logger: { warn: vi.fn() } } as never,
+      socket as never,
+      {} as never,
+      new Config({}),
+      vi.fn(),
+      runtime,
+    )
+    const lease = runtime.acquireLease({
+      connectionId: connection.id,
+      platform: 'web',
+      clientVersion: 'test',
+      sessionId: 'session-one',
+      revoke: vi.fn(),
+    })
+    if (!lease.ok) throw new Error('pre-ready lease was not acquired')
+    const internal = connection as unknown as { leaseAcquired: boolean }
+    internal.leaseAcquired = true
+
+    connection.dispose('client-disconnected')
+
+    expect(runtime.occupancy()).toEqual({ protocol: 'dsh.voice.v1', active: false })
+    expect(runtime.acquireLease({
+      connectionId: 'cannot-resume-ghost',
+      platform: 'web',
+      clientVersion: 'test',
+      sessionId: 'session-one',
+      resumeId: lease.state.id,
+      revoke: vi.fn(),
+    })).toMatchObject({ ok: false, reason: 'invalid-resume' })
+  })
+
   it('allows exactly one client and exposes its platform to other surfaces', () => {
     const runtime = new VoiceRuntime()
     const web = runtime.acquireLease({
@@ -127,7 +174,7 @@ describe('VoiceRuntime authoritative occupancy', () => {
     const web = runtime.acquireLease({
       connectionId: 'web-new',
       platform: 'web',
-      clientVersion: '0.1.0-alpha.9-research.2',
+      clientVersion: '0.1.0-alpha.9-research.3',
       sessionId: 'session-1',
       resumeId: initial.state.id,
       revoke: vi.fn(),

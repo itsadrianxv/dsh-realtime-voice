@@ -65,3 +65,5 @@ export declare class VoiceCallController implements HostObservable<VoiceSnapshot
     private resetCallCursors;
     private update;
 }
+/** Presence is authoritative only before this WebUI owns or can resume a call. */
+export declare function isVoiceDialUnavailable(snapshot: VoiceSnapshot): boolean;

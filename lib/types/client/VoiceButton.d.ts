@@ -1,5 +1,5 @@
 import type { HostObservable, InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots';
-import type { VoiceSnapshot } from './controller.ts';
+import { type VoiceSnapshot } from './controller.ts';
 export interface VoiceButtonInjected {
     hooks: {
         voice: HostObservable<VoiceSnapshot>;

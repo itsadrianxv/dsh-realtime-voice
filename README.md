@@ -2,7 +2,7 @@
 
 DeepSeek Harness 官方插件形态的实时语音 Agent：安装后在 WebUI 输入框旁出现拨打按钮，用户可持续对话、打断播报、询问进度，并用语音启动、追加、纠正或停止当前 DSH Agent 工作。
 
-当前研究版本：`0.1.0-alpha.9-research.2`，目标 DSH：`0.1.0-rc.7`。该版本位于独立研究分支，不替换已发布的 `alpha.8`。
+当前研究版本：`0.1.0-alpha.9-research.3`，目标 DSH：`0.1.0-rc.7`。该版本位于独立研究分支，不替换已发布的 `alpha.8`。
 
 本包同时声明 DSH bundle、Host 插件和“原生 WebUI 浏览器侧”插件。这里不是另做一个网站：UI 直接注入 DSH 自带的 `http://127.0.0.1:3080`，不新增页面或 UI 端口。它不修改 DSH 源码，不另起后台进程；卸载或禁用时会移除 UI/路由并关闭麦克风、音频、浏览器 WebSocket 和百炼连接，已经交给 DSH 的任务继续运行。
 
@@ -22,6 +22,7 @@ DeepSeek Harness 官方插件形态的实时语音 Agent：安装后在 WebUI �
 - DSH credentials 解析 `DASHSCOPE_API_KEY`，密钥不进入浏览器包
 - `dsh.voice.v1` 客户端无关协议：WebUI 与微信小程序共用 hello/ready、播放排空 ACK、24 字节二进制帧、16/24 kHz PCM、打断和恢复契约
 - DSH Host 权威单通话租约：status 只提供非秘密元数据，恢复 token 仅由 owning socket 获得；WebUI/微信同时拨号时只有 Host 原子仲裁的客户端成功
+- WebUI 本地所有权优先：已 ready、正在重连或仍持有本地恢复上下文时，不会被公开 `status.active` 误画成“另一端占用”；新拨号才由 status 预检，最终始终以 Host 的 ready/busy 裁决为准
 
 运行时为双平面：Qwen Audio Realtime 是低延迟会话面，负责听、说、自然问答、VAD 打断和判断是否需要真实执行；DSH 当前会话选择的 DeepSeek/千问等 Agent 模型是执行面，负责工具、项目上下文和持续 Agent 工作。两者通过 4 个窄语义 Function Call（交接、取消、审批、追问回答）及 DSH 权威事件合成一个助手体验。
 

@@ -88,16 +88,25 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
 
   async start(sessionId: string): Promise<void> {
     if (this.snapshot.phase !== 'idle' && this.snapshot.phase !== 'error') return
+    const resumeContext = localResumeContext(this.snapshot)
+    const targetSessionId = resumeContext?.sessionId ?? sessionId
     if (!window.isSecureContext || navigator.mediaDevices?.getUserMedia === undefined) {
-      this.update({ ...INITIAL_SNAPSHOT, phase: 'error', error: '实时语音需要安全上下文：请使用 localhost 或 HTTPS。' })
+      this.update({
+        ...INITIAL_SNAPSHOT,
+        ...resumeContext,
+        phase: 'error',
+        error: '实时语音需要安全上下文：请使用 localhost 或 HTTPS。',
+      })
       return
     }
     const startEpoch = ++this.startEpoch
     this.ending = false
-    this.update({ ...INITIAL_SNAPSHOT, phase: 'connecting', sessionId })
+    this.update({ ...INITIAL_SNAPSHOT, ...resumeContext, phase: 'connecting', sessionId: targetSessionId })
     const occupancy = await this.refreshPresence()
     if (startEpoch !== this.startEpoch || this.ending) return
-    if (occupancy?.active) {
+    // Public presence deliberately cannot identify the owner. A locally held
+    // resume capability is presented to Host; voice.ready/busy is authoritative.
+    if (occupancy?.active && resumeContext === undefined) {
       this.update({
         ...INITIAL_SNAPSHOT,
         occupancy,
@@ -108,7 +117,13 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
     }
     this.reconnectAttempt = 0
     this.lastReconnectError = undefined
-    this.update({ ...INITIAL_SNAPSHOT, phase: 'requesting-permission', sessionId })
+    this.update({
+      ...INITIAL_SNAPSHOT,
+      ...resumeContext,
+      phase: 'requesting-permission',
+      sessionId: targetSessionId,
+      ...(occupancy === undefined ? {} : { occupancy }),
+    })
     try {
       const audio = new BrowserAudioEngine(
         pcm => this.sendAudio(pcm),
@@ -119,13 +134,14 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
       await audio.start()
       this.startedAt = Date.now()
       this.timer = setInterval(() => this.tick(), 1000)
-      await this.connect(sessionId)
+      await this.connect(targetSessionId)
     } catch (error) {
+      if (this.ending) return
       const message = error instanceof Error ? error.message : String(error)
       if (this.reconnectTimer !== undefined) {
         this.update({ ...this.snapshot, error: message })
       } else {
-        await this.fail(message)
+        await this.fail(message, resumeContext !== undefined)
       }
     }
   }
@@ -296,13 +312,18 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
     }
     if (typeof event.data !== 'string') return
     const message = JSON.parse(event.data) as VoiceServerControl
-    if (message.serverSeq <= this.lastServerSeq) return
-    this.lastServerSeq = message.serverSeq
+    // A rejected provisional resume has its own short sequence space. Its
+    // busy/fatal decision must not be discarded against the old call cursor.
+    const handshakeDecision = !this.providerReady
+      && (message.type === 'voice.busy' || (message.type === 'voice.error' && !message.recoverable))
+    if (!handshakeDecision && message.serverSeq <= this.lastServerSeq) return
+    if (message.serverSeq > this.lastServerSeq) this.lastServerSeq = message.serverSeq
     switch (message.type) {
       case 'voice.ready':
         this.update({
           ...this.snapshot,
           phase: 'listening',
+          sessionId: message.target.sessionId,
           voiceSessionId: message.voiceSessionId,
           providerModel: message.provider.model,
           turnDetection: message.provider.turnDetection,
@@ -311,7 +332,7 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
         })
         return
       case 'voice.busy':
-        void this.fail(busyMessage(message.occupancy))
+        void this.fail(busyMessage(message.occupancy), false, message.occupancy)
         return
       case 'voice.state':
         this.update({
@@ -402,7 +423,7 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
     if (this.reconnectTimer !== undefined || this.ending) return
     if (this.reconnectAttempt >= 8) {
       const detail = this.lastReconnectError === undefined ? '' : ` 最后原因：${this.lastReconnectError}`
-      void this.fail(`实时语音连接多次重试失败，DSH 中已经开始的任务不会被取消。${detail}`)
+      void this.fail(`实时语音连接多次重试失败，DSH 中已经开始的任务不会被取消。${detail}`, true)
       return
     }
     const rateLimited = /rate.?limit|限流|代码\s*1007/i.test(this.lastReconnectError ?? '')
@@ -435,11 +456,22 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
     this.update({ ...this.snapshot, phase: 'listening' })
   }
 
-  private async fail(message: string): Promise<void> {
+  private async fail(
+    message: string,
+    preserveResume = false,
+    occupancy?: VoiceOccupancyStatus,
+  ): Promise<void> {
+    const resumeContext = preserveResume ? localResumeContext(this.snapshot) : undefined
     this.ending = true
     await this.cleanup()
-    this.resetCallCursors()
-    this.update({ ...INITIAL_SNAPSHOT, phase: 'error', error: message })
+    if (resumeContext === undefined) this.resetCallCursors()
+    this.update({
+      ...INITIAL_SNAPSHOT,
+      ...resumeContext,
+      phase: 'error',
+      error: message,
+      ...(occupancy === undefined ? {} : { occupancy }),
+    })
   }
 
   private async cleanup(): Promise<void> {
@@ -498,4 +530,20 @@ export class VoiceCallController implements HostObservable<VoiceSnapshot> {
 function busyMessage(occupancy: VoiceOccupancyStatus): string {
   void occupancy
   return '实时语音正由另一个客户端占用，请先在该端结束通话。'
+}
+
+function localResumeContext(
+  snapshot: VoiceSnapshot,
+): { sessionId: string; voiceSessionId: string } | undefined {
+  return snapshot.sessionId === undefined || snapshot.voiceSessionId === undefined
+    ? undefined
+    : { sessionId: snapshot.sessionId, voiceSessionId: snapshot.voiceSessionId }
+}
+
+/** Presence is authoritative only before this WebUI owns or can resume a call. */
+export function isVoiceDialUnavailable(snapshot: VoiceSnapshot): boolean {
+  const activeTransport = snapshot.phase !== 'idle' && snapshot.phase !== 'error'
+  return snapshot.occupancy?.active === true
+    && !activeTransport
+    && localResumeContext(snapshot) === undefined
 }

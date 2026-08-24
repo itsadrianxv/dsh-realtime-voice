@@ -4,7 +4,7 @@ export const VOICE_PROTOCOL = 'dsh.voice.v1' as const
 export const VOICE_PROTOCOL_VERSION = 1 as const
 export const VOICE_ROUTE = '/plugins/realtime-voice/v1' as const
 export const VOICE_STATUS_ROUTE = '/plugins/realtime-voice/v1/status' as const
-export const VOICE_WEB_CLIENT_VERSION = '0.1.0-alpha.9-research.2' as const
+export const VOICE_WEB_CLIENT_VERSION = '0.1.0-alpha.9-research.3' as const
 
 export const INPUT_SAMPLE_RATE = 16_000 as const
 export const OUTPUT_SAMPLE_RATE = 24_000 as const

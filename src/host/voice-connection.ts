@@ -107,7 +107,9 @@ export class VoiceConnection {
     this.provider = undefined
     if (this.leaseAcquired) {
       this.leaseAcquired = false
-      this.runtime.release(this.provisionalId, isTransientDisconnect(reason))
+      // Before voice.ready the client has never received its resume token, so
+      // retaining a grace lease would create an owner that cannot recover it.
+      this.runtime.release(this.provisionalId, this.ready && isTransientDisconnect(reason))
     }
     if (this.socket.readyState === this.socket.OPEN || this.socket.readyState === this.socket.CONNECTING) {
       this.socket.close(1001, reason)
