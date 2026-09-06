@@ -6,7 +6,7 @@ import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-host-apiproxy'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-tools'
 import { WebSocketServer } from 'ws'
@@ -35,16 +35,19 @@ export function apply(ctx: Context, config: VoiceConfig): void {
   // Settings are optional at the Cordis boundary. When the Web profile serves
   // them, model changes become authoritative for the next accepted call; an
   // already connected upstream keeps its negotiated model until that call ends.
-  installSettingsSection(
-    ctx,
-    settingsNamespace(REALTIME_VOICE_SETTINGS_NAMESPACE),
-    Config,
-    config,
-    {
-      setSource(source) { readConfig = source },
-      onChange() {},
-    },
-  )
+  // `installSettingsSection` was removed in dsh-settings 0.1.2. Register the
+  // namespace directly while keeping settings optional for non-Web profiles.
+  ctx.inject(['settings'], (settingsCtx) => {
+    const scope = settingsCtx.settings.register(
+      REALTIME_VOICE_SETTINGS_NAMESPACE,
+      Config,
+      { base: config },
+    )
+    readConfig = () => scope.get()
+    settingsCtx.effect(() => () => {
+      readConfig = () => config
+    })
+  })
 
   const authorizeUpgrade = (request: IncomingMessage, socket: Duplex): VoiceConfig | undefined => {
     const activeConfig = readConfig()
