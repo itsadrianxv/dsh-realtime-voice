@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
-import { RpcId } from '@deepseek-ai/dsh-host-apiproxy'
-import { SessionId } from '@deepseek-ai/dsh-session/types'
+const SessionId = (value: string): any => value
+const RpcId = (value: string): any => value
 
 export interface VoiceSessionSnapshot {
   sessionId: string
@@ -80,4 +80,3 @@ export function assistantText(value: unknown): string | undefined {
     .trim()
   return text === '' ? undefined : text
 }
-

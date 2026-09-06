@@ -2,8 +2,8 @@ import { randomUUID } from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
-import { RpcId } from '@deepseek-ai/dsh-host-apiproxy'
-import { SessionId } from '@deepseek-ai/dsh-session/types'
+const SessionId = (value: string): any => value
+const RpcId = (value: string): any => value
 import type WebSocket from 'ws'
 import {
   AUDIO_CHANNELS,

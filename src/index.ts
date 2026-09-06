@@ -1,6 +1,7 @@
 /** DSH Host half: same-process realtime voice route, provider bridge, and complete disposal. */
 import type { Duplex } from 'node:stream'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-credentials'
@@ -22,10 +23,39 @@ export { Config }
 export type { VoiceConfig }
 
 /** Host services required before the route can be mounted. */
-export const inject = ['webServer', 'apiProxy', 'credentials', 'agents', 'systemPrompt', 'tools']
+export const inject = ['webServer', 'sessionController', 'credentials', 'agents', 'systemPrompt', 'tools']
 
 /** Mount one exact WebSocket route. Every accepted connection is owned by this plugin fiber. */
 export function apply(ctx: Context, config: VoiceConfig): void {
+  // Harness 0.1.2 replaced the legacy ApiProxy service with the direct
+  // SessionController/Typert services. Keep the plugin's internal call sites
+  // stable behind a small local facade while the transport remains unchanged.
+  ctx.inject(['sessionController'], (sessionCtx) => {
+    const controller = (sessionCtx as Context & { sessionController: any }).sessionController
+    const responders = new Map<string, (value: unknown) => void>()
+    const ok = (value: unknown) => ({ result: { ok: true, value } })
+    const apiProxy = {
+      sessions: {
+        list: async ({ payload }: { payload: Record<string, unknown> }) => ok(await controller.list(payload as never)),
+        prompt: async ({ payload }: { payload: Record<string, unknown> }) => ok(await controller.prompt(payload as never, new AbortController().signal)),
+        updateQueue: async ({ payload }: { payload: Record<string, unknown> }) => ok(controller.updateQueue(payload as never)),
+        cancel: async ({ payload }: { payload: Record<string, unknown> }) => ok(controller.cancel(payload as never)),
+        history: async ({ payload }: { payload: Record<string, unknown> }) => ok({ events: (await controller.page({ sessionId: payload.sessionId, limit: payload.maxMessages } as never, new AbortController().signal)).events }),
+      },
+      events: {
+        host: (_request: unknown, signal: AbortSignal) => createLegacyEventStream(sessionCtx, 'host', signal),
+        mux: (_request: unknown, signal: AbortSignal) => createLegacyEventStream(sessionCtx, 'mux', signal, responders),
+      },
+      respond: async ({ rpcId, result }: { rpcId: string; result?: { value?: unknown } }) => {
+        const resolve = responders.get(String(rpcId))
+        if (resolve === undefined) return { accepted: false, reason: 'response is no longer pending' }
+        responders.delete(String(rpcId))
+        resolve(result?.value)
+        return { accepted: true }
+      },
+    }
+    ctx.provide('apiProxy', apiProxy as never)
+  })
   const proxyServer = new WebSocketServer({ noServer: true })
   const directServer = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 })
   const connections = new Set<{ dispose(reason?: string): void }>()
@@ -139,4 +169,64 @@ function isAllowedOrigin(request: IncomingMessage): boolean {
   } catch {
     return false
   }
+}
+
+function createLegacyEventStream(
+  ctx: Context,
+  kind: 'host' | 'mux',
+  signal: AbortSignal,
+  responders = new Map<string, (value: unknown) => void>(),
+): AsyncIterable<{ rpcId: string; payload: unknown }> {
+  const queue: Array<{ rpcId: string; payload: unknown }> = []
+  let wake: (() => void) | undefined
+  let closed = false
+  const push = (payload: unknown) => {
+    if (closed) return
+    queue.push({ rpcId: randomUUID(), payload })
+    wake?.()
+  }
+  const disposers = kind === 'host'
+    ? [
+        (ctx as any).on('api-session/status', (sessionId: unknown, running: unknown) => push({ type: 'host/session-status', sessionId, running })),
+        (ctx as any).on('agent/error', (value: unknown) => {
+          const event = value as Record<string, unknown>
+          const agent = event.agent as Record<string, unknown> | undefined
+          push({ type: 'host/agent-error', sessionId: agent?.id, error: event.error })
+        }),
+      ]
+    : [
+        (ctx as any).on('session/event', (session: unknown, event: unknown) => {
+          const value = session as Record<string, unknown>
+          push({ type: 'session/event', sessionId: value?.id ?? value?.sessionId, event })
+        }),
+        (ctx as any).on('approval/request', (request: any) => {
+          const rpcId = randomUUID()
+          push({ type: 'approval/requested', sessionId: request.agent?.session?.id ?? request.agent?.id, ...request, rpcId })
+          return new Promise(resolve => responders.set(rpcId, resolve))
+        }),
+        (ctx as any).on('user-questions/request', (request: any) => {
+          const rpcId = randomUUID()
+          push({ type: 'question/requested', sessionId: request.agent?.session?.id ?? request.agent?.id, questions: request.questions, rpcId })
+          return new Promise(resolve => responders.set(rpcId, resolve))
+        }),
+      ]
+  const iterable = (async function* () {
+    const abort = () => { closed = true; wake?.() }
+    signal.addEventListener('abort', abort, { once: true })
+    try {
+      while (!closed && !signal.aborted) {
+        if (queue.length > 0) {
+          yield queue.shift() as { rpcId: string; payload: unknown }
+          continue
+        }
+        await new Promise<void>(resolve => { wake = resolve })
+        wake = undefined
+      }
+    } finally {
+      closed = true
+      signal.removeEventListener('abort', abort)
+      for (const dispose of disposers) dispose()
+    }
+  })()
+  return iterable
 }
